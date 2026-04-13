@@ -1,0 +1,297 @@
+---
+title: "Application layer: CQRS handlers and pipeline"
+description: "How the Application layer implements CQRS with MediatR, defines the pipeline behaviours, and declares interfaces that keep it independent from Infrastructure."
+keywords: ["application layer", "cqrs", "mediatr", "commands", "queries", "pipeline behaviours", "fluent validation"]
+---
+
+The Application layer contains all application-specific business logic: CQRS commands and queries, FluentValidation validators, AutoMapper profiles, and the MediatR pipeline behaviours. It depends only on the Domain project and on pure .NET/NuGet libraries. There is no reference to EF Core, ASP.NET Core, or any other infrastructure concern—those implementations are provided by the Infrastructure and Web layers through interfaces declared here.
+
+## Interfaces defined in Application
+
+Application declares the contracts that Infrastructure must fulfil. This inverts the dependency: Infrastructure references Application, never the other way around.
+
+<CodeGroup>
+
+```csharp IApplicationDbContext.cs
+public interface IApplicationDbContext
+{
+    DbSet<TodoList> TodoLists { get; }
+
+    DbSet<TodoItem> TodoItems { get; }
+
+    Task<int> SaveChangesAsync(CancellationToken cancellationToken);
+}
+```
+
+```csharp IIdentityService.cs
+public interface IIdentityService
+{
+    Task<string?> GetUserNameAsync(string userId);
+
+    Task<bool> IsInRoleAsync(string userId, string role);
+
+    Task<bool> AuthorizeAsync(string userId, string policyName);
+
+    Task<(Result Result, string UserId)> CreateUserAsync(string userName, string password);
+
+    Task<Result> DeleteUserAsync(string userId);
+}
+```
+
+</CodeGroup>
+
+Handlers inject `IApplicationDbContext` rather than `ApplicationDbContext` directly. Swapping the database engine (SQLite → PostgreSQL → SQL Server) or replacing EF Core entirely requires no changes inside Application.
+
+## MediatR pipeline
+
+Every request travels through a chain of behaviours before reaching its handler. The order is determined by registration in `DependencyInjection.cs`:
+
+<Steps>
+  <Step title="Logging (pre-processor)">
+    `LoggingBehaviour<TRequest>` implements `IRequestPreProcessor` and runs before any pipeline behaviour. It logs the request name, current user ID, and username using `ILogger`.
+
+    ```csharp
+    public async Task Process(TRequest request, CancellationToken cancellationToken)
+    {
+        var requestName = typeof(TRequest).Name;
+        var userId = _user.Id ?? string.Empty;
+        string? userName = string.Empty;
+
+        if (!string.IsNullOrEmpty(userId))
+        {
+            userName = await _identityService.GetUserNameAsync(userId);
+        }
+
+        _logger.LogInformation(
+            "CleanArchitecture Request: {Name} {@UserId} {@UserName} {@Request}",
+            requestName, userId, userName, request);
+    }
+    ```
+  </Step>
+  <Step title="Unhandled exception wrapping">
+    `UnhandledExceptionBehaviour<TRequest, TResponse>` catches any exception that escapes subsequent behaviours or the handler, logs it with the request details, then re-throws so the Web layer's exception handler can convert it to a problem details response.
+  </Step>
+  <Step title="Authorization">
+    `AuthorizationBehaviour<TRequest, TResponse>` inspects the request type for `[Authorize]` attributes. It checks that the user is authenticated and, if the attribute specifies roles or policies, delegates to `IIdentityService`.
+
+    ```csharp
+    var authorizeAttributes = request.GetType()
+        .GetCustomAttributes<AuthorizeAttribute>();
+
+    if (authorizeAttributes.Any())
+    {
+        if (_user.Id == null)
+            throw new UnauthorizedAccessException();
+
+        // Role-based check ...
+        // Policy-based check via IIdentityService.AuthorizeAsync ...
+    }
+
+    return await next();
+    ```
+  </Step>
+  <Step title="Validation">
+    `ValidationBehaviour<TRequest, TResponse>` runs all `IValidator<TRequest>` implementations registered by FluentValidation. If any validators report failures the behaviour throws a `ValidationException`—a custom exception that the Web layer converts into a 400 response with field-level error details.
+
+    ```csharp
+    if (_validators.Any())
+    {
+        var validationResults = await Task.WhenAll(
+            _validators.Select(v =>
+                v.ValidateAsync(new ValidationContext<TRequest>(request),
+                    cancellationToken)));
+
+        var failures = validationResults
+            .Where(r => r.Errors.Any())
+            .SelectMany(r => r.Errors)
+            .ToList();
+
+        if (failures.Count != 0)
+            throw new ValidationException(failures);
+    }
+
+    return await next();
+    ```
+  </Step>
+  <Step title="Performance monitoring">
+    `PerformanceBehaviour<TRequest, TResponse>` wraps the downstream call in a `Stopwatch`. If the handler takes longer than 500 ms it emits a `LogWarning` that includes the elapsed time, request name, and current user—useful for identifying slow queries in production logs.
+  </Step>
+  <Step title="Handler">
+    The concrete `IRequestHandler<TRequest, TResponse>` implementation executes the actual business logic—reading or writing through `IApplicationDbContext`, calling domain methods, and returning the response.
+  </Step>
+</Steps>
+
+## Command example: CreateTodoList
+
+Commands mutate state and return a minimal result (here, the new entity's ID).
+
+<CodeGroup>
+
+```csharp CreateTodoList.cs
+public record CreateTodoListCommand : IRequest<int>
+{
+    public string? Title { get; init; }
+    public string? Colour { get; init; }
+}
+
+public class CreateTodoListCommandHandler : IRequestHandler<CreateTodoListCommand, int>
+{
+    private readonly IApplicationDbContext _context;
+
+    public CreateTodoListCommandHandler(IApplicationDbContext context)
+    {
+        _context = context;
+    }
+
+    public async Task<int> Handle(
+        CreateTodoListCommand request,
+        CancellationToken cancellationToken)
+    {
+        var entity = new TodoList
+        {
+            Title = request.Title,
+            Colour = Colour.From(request.Colour ?? Colour.Grey)
+        };
+
+        _context.TodoLists.Add(entity);
+
+        await _context.SaveChangesAsync(cancellationToken);
+
+        return entity.Id;
+    }
+}
+```
+
+```csharp CreateTodoListCommandValidator.cs
+public class CreateTodoListCommandValidator
+    : AbstractValidator<CreateTodoListCommand>
+{
+    private readonly IApplicationDbContext _context;
+
+    public CreateTodoListCommandValidator(IApplicationDbContext context)
+    {
+        _context = context;
+
+        RuleFor(v => v.Title)
+            .NotEmpty()
+            .MaximumLength(200)
+            .MustAsync(BeUniqueTitle)
+                .WithMessage("'{PropertyName}' must be unique.")
+                .WithErrorCode("Unique");
+    }
+
+    public async Task<bool> BeUniqueTitle(
+        string title,
+        CancellationToken cancellationToken)
+    {
+        return !await _context.TodoLists
+            .AnyAsync(l => l.Title == title, cancellationToken);
+    }
+}
+```
+
+</CodeGroup>
+
+The command and its validator live in the same folder (`TodoLists/Commands/CreateTodoList/`). MediatR automatically discovers the handler; FluentValidation automatically discovers the validator via `AddValidatorsFromAssembly`.
+
+## Query example: GetTodos
+
+Queries are read-only and never modify state. They use AutoMapper's `ProjectTo` to map directly in the database query, avoiding loading full entity graphs.
+
+```csharp GetTodos.cs
+[Authorize]
+public record GetTodosQuery : IRequest<TodosVm>;
+
+public class GetTodosQueryHandler : IRequestHandler<GetTodosQuery, TodosVm>
+{
+    private readonly IApplicationDbContext _context;
+    private readonly IMapper _mapper;
+
+    public GetTodosQueryHandler(IApplicationDbContext context, IMapper mapper)
+    {
+        _context = context;
+        _mapper = mapper;
+    }
+
+    public async Task<TodosVm> Handle(
+        GetTodosQuery request,
+        CancellationToken cancellationToken)
+    {
+        return new TodosVm
+        {
+            PriorityLevels = Enum.GetValues(typeof(PriorityLevel))
+                .Cast<PriorityLevel>()
+                .Select(p => new LookupDto { Id = (int)p, Title = p.ToString() })
+                .ToList(),
+
+            Colours =
+            [
+                new ColourDto { Code = Colour.Grey,   Name = nameof(Colour.Grey) },
+                new ColourDto { Code = Colour.Purple, Name = nameof(Colour.Purple) },
+                // ...
+            ],
+
+            Lists = await _context.TodoLists
+                .AsNoTracking()
+                .ProjectTo<TodoListDto>(_mapper.ConfigurationProvider)
+                .OrderBy(t => t.Title)
+                .ToListAsync(cancellationToken)
+        };
+    }
+}
+```
+
+The `[Authorize]` attribute on `GetTodosQuery` is inspected by `AuthorizationBehaviour`—the handler is only reached if the user is authenticated.
+
+### View model and DTOs
+
+`TodosVm` is the flat response object returned to the Web layer. It contains lookup lists for colours and priority levels alongside the data. `TodoListDto` uses an inner `Mapping` class (a Automapper `Profile`) to keep the mapping co-located with the DTO:
+
+```csharp TodoListDto.cs
+public class TodoListDto
+{
+    public int Id { get; init; }
+    public string? Title { get; init; }
+    public string? Colour { get; init; }
+    public IReadOnlyCollection<TodoItemDto> Items { get; init; }
+
+    private class Mapping : Profile
+    {
+        public Mapping()
+        {
+            CreateMap<TodoList, TodoListDto>();
+        }
+    }
+}
+```
+
+## Directory structure
+
+```
+Application/
+├── Common/
+│   ├── Behaviours/
+│   │   ├── AuthorizationBehaviour.cs
+│   │   ├── LoggingBehaviour.cs
+│   │   ├── PerformanceBehaviour.cs
+│   │   ├── UnhandledExceptionBehaviour.cs
+│   │   └── ValidationBehaviour.cs
+│   ├── Exceptions/
+│   ├── Interfaces/
+│   │   ├── IApplicationDbContext.cs
+│   │   ├── IIdentityService.cs
+│   │   └── IUser.cs
+│   ├── Models/
+│   └── Security/
+├── TodoItems/
+│   ├── Commands/
+│   └── Queries/
+├── TodoLists/
+│   ├── Commands/
+│   │   ├── CreateTodoList/
+│   │   ├── DeleteTodoList/
+│   │   └── UpdateTodoList/
+│   └── Queries/
+│       └── GetTodos/
+└── WeatherForecasts/
+```

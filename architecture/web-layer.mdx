@@ -1,0 +1,254 @@
+---
+title: "Web layer: minimal API endpoints and SPA hosting"
+description: "How the Web layer registers minimal API endpoints via IEndpointGroup, dispatches to MediatR through ISender, hosts a SPA, and serves OpenAPI docs via Scalar."
+keywords: ["web layer", "minimal api", "iendpointgroup", "isender", "mediatr", "openapi", "scalar", "spa", "angular", "react"]
+---
+
+The Web project is the entry point of the application. It hosts the ASP.NET Core minimal API, serves a single-page application (Angular by default, React optional), exposes an OpenAPI document browsable through Scalar, and wires up the services registered by the Application and Infrastructure layers. It depends on both Application and Infrastructure, but every piece of business logic is delegated to MediatR—endpoints themselves contain no logic.
+
+## Program.cs
+
+`Program.cs` is deliberately short. It composes the service container, configures the middleware pipeline, and maps endpoints by scanning the assembly for `IEndpointGroup` implementations:
+
+```csharp Program.cs
+var builder = WebApplication.CreateBuilder(args);
+
+builder.AddServiceDefaults();
+builder.AddKeyVaultIfConfigured();
+builder.AddApplicationServices();       // Application/DependencyInjection.cs
+builder.AddInfrastructureServices();    // Infrastructure/DependencyInjection.cs
+builder.AddWebServices();               // Web/DependencyInjection.cs
+
+var app = builder.Build();
+
+if (app.Environment.IsDevelopment())
+{
+    await app.InitialiseDatabaseAsync(); // seed data
+}
+else
+{
+    app.UseHsts();
+}
+
+app.UseHttpsRedirection();
+app.UseCors(static builder =>
+    builder.AllowAnyMethod()
+           .AllowAnyHeader()
+           .AllowAnyOrigin());
+
+app.UseFileServer();        // serves the SPA's static files from wwwroot/
+
+app.MapOpenApi();
+app.MapScalarApiReference();
+
+app.UseExceptionHandler(options => { });
+
+app.MapDefaultEndpoints();
+app.MapEndpoints(typeof(Program).Assembly); // discovers all IEndpointGroup classes
+
+app.MapFallbackToFile("index.html");        // SPA client-side routing
+
+app.Run();
+```
+
+`MapEndpoints` is a custom extension method that reflects over the assembly, finds every non-abstract class that implements `IEndpointGroup`, creates a route group at `/api/{ClassName}`, and invokes `Map` on it.
+
+## The IEndpointGroup pattern
+
+`IEndpointGroup` is a marker interface defined in `Web/Infrastructure/IEndpointGroup.cs`. Each endpoint class implements a static `Map` method that configures a `RouteGroupBuilder`:
+
+```csharp IEndpointGroup.cs
+/// <summary>
+/// Defines a group of related Minimal API endpoints.
+/// Automatically discovered and registered as a route group
+/// with a matching OpenAPI tag.
+/// Route prefix defaults to /api/{ClassName}.
+/// </summary>
+public interface IEndpointGroup
+{
+    static virtual string? RoutePrefix => null;
+
+    static abstract void Map(RouteGroupBuilder groupBuilder);
+}
+```
+
+`WebApplicationExtensions.MapEndpoints` performs the discovery:
+
+```csharp WebApplicationExtensions.cs
+public static WebApplication MapEndpoints(this WebApplication app, Assembly assembly)
+{
+    var endpointGroupTypes = assembly.GetExportedTypes()
+        .Where(t => t is { IsAbstract: false, IsInterface: false }
+                 && t.IsAssignableTo(typeof(IEndpointGroup)));
+
+    foreach (var type in endpointGroupTypes)
+    {
+        var groupName   = type.Name;
+        var routePrefix = type.GetProperty(nameof(IEndpointGroup.RoutePrefix))
+                              ?.GetValue(null) as string ?? $"/api/{groupName}";
+        var group = app.MapGroup(routePrefix).WithTags(groupName);
+        type.GetMethod(nameof(IEndpointGroup.Map))!.Invoke(null, [group]);
+    }
+
+    return app;
+}
+```
+
+This means adding a new feature only requires creating a new class that implements `IEndpointGroup`—no manual registration is needed.
+
+## Endpoint example: TodoLists
+
+`TodoLists.cs` shows all four CRUD operations. Every handler receives `ISender` (the MediatR send-only interface) and delegates immediately to a command or query—there is no business logic in the endpoint itself:
+
+```csharp TodoLists.cs
+public class TodoLists : IEndpointGroup
+{
+    public static void Map(RouteGroupBuilder groupBuilder)
+    {
+        groupBuilder.RequireAuthorization();
+
+        groupBuilder.MapGet(GetTodoLists);
+        groupBuilder.MapPost(CreateTodoList);
+        groupBuilder.MapPut(UpdateTodoList, "{id}");
+        groupBuilder.MapDelete(DeleteTodoList, "{id}");
+    }
+
+    [EndpointSummary("Get all Todo Lists")]
+    [EndpointDescription("Retrieves all todo lists along with their items.")]
+    public static async Task<Ok<TodosVm>> GetTodoLists(ISender sender)
+    {
+        var vm = await sender.Send(new GetTodosQuery());
+        return TypedResults.Ok(vm);
+    }
+
+    [EndpointSummary("Create a new Todo List")]
+    [EndpointDescription("Creates a new todo list and returns the ID of the created list.")]
+    public static async Task<Created<int>> CreateTodoList(
+        ISender sender, CreateTodoListCommand command)
+    {
+        var id = await sender.Send(command);
+        return TypedResults.Created($"/{nameof(TodoLists)}/{id}", id);
+    }
+
+    [EndpointSummary("Update a Todo List")]
+    [EndpointDescription("Updates the specified todo list.")]
+    public static async Task<Results<NoContent, BadRequest>> UpdateTodoList(
+        ISender sender, int id, UpdateTodoListCommand command)
+    {
+        if (id != command.Id) return TypedResults.BadRequest();
+        await sender.Send(command);
+        return TypedResults.NoContent();
+    }
+
+    [EndpointSummary("Delete a Todo List")]
+    [EndpointDescription("Deletes the todo list with the specified ID.")]
+    public static async Task<NoContent> DeleteTodoList(ISender sender, int id)
+    {
+        await sender.Send(new DeleteTodoListCommand(id));
+        return TypedResults.NoContent();
+    }
+}
+```
+
+Key patterns:
+
+- **`ISender`** — the MediatR interface for sending requests; injected by the DI container directly into the method parameters (minimal API parameter binding).
+- **`TypedResults`** — strongly-typed result helpers that let ASP.NET Core generate accurate OpenAPI response schemas without extra attributes.
+- **`RequireAuthorization()`** — applied at the group level so all endpoints in the group require an authenticated user. Individual endpoints can still opt out with `AllowAnonymous()`.
+- **`[EndpointSummary]` / `[EndpointDescription]`** — populate the OpenAPI document's `summary` and `description` fields without a separate XML doc file.
+
+## ISender vs IMediator
+
+Endpoints use `ISender` rather than `IMediator`. `ISender` exposes only `Send`—the method needed to dispatch commands and queries. Using the narrower interface makes the dependency explicit and prevents endpoints from accidentally publishing events directly.
+
+## OpenAPI and Scalar
+
+The Web layer registers the ASP.NET Core OpenAPI document generator and Scalar's API reference UI:
+
+```csharp DependencyInjection.cs
+builder.Services.AddEndpointsApiExplorer();
+
+builder.Services.AddOpenApi(options =>
+{
+    options.AddOperationTransformer<ApiExceptionOperationTransformer>();
+    options.AddOperationTransformer<IdentityApiOperationTransformer>();
+    // options.AddDocumentTransformer<BearerSecuritySchemeTransformer>(); // API-only mode
+});
+```
+
+In `Program.cs`:
+
+```csharp
+app.MapOpenApi();           // serves /openapi/v1.json
+app.MapScalarApiReference(); // serves the Scalar UI at /scalar
+```
+
+`ApiExceptionOperationTransformer` adds standard problem-details response schemas (400, 401, 403, 500) to every operation automatically so they appear in the Scalar UI without annotating each endpoint individually.
+
+## SPA hosting
+
+The template ships with Angular (`ClientApp/`) and React (`ClientApp-React/`) front-ends. The selected client app is built into `wwwroot/` before or during the .NET build.
+
+```csharp
+app.UseFileServer(); // serves static files from wwwroot/ including index.html
+
+// ...
+
+app.MapFallbackToFile("index.html"); // return index.html for any unmatched route
+```
+
+`UseFileServer` handles exact static asset requests (JS bundles, CSS, images). `MapFallbackToFile` handles client-side routes—any URL that doesn't match an API route or a static file is returned `index.html` so the Angular/React router can take over.
+
+<Note>
+In API-only mode (generated with `--apiOnly`), `MapFallbackToFile` is removed and the root `/` redirects to `/scalar` instead, so there is no SPA to host.
+</Note>
+
+## Exception handling
+
+`ProblemDetailsExceptionHandler` is registered as the exception handler middleware. It translates well-known application exceptions (like `ValidationException` and `ForbiddenAccessException`) into RFC 9457 problem details responses with appropriate HTTP status codes. Custom exceptions thrown in Application handlers are caught here so endpoints never need try/catch blocks.
+
+## Web services registration
+
+`AddWebServices` in `Web/DependencyInjection.cs` wires the Web-specific services:
+
+```csharp DependencyInjection.cs
+public static void AddWebServices(this IHostApplicationBuilder builder)
+{
+    builder.Services.AddDatabaseDeveloperPageExceptionFilter();
+    builder.Services.AddScoped<IUser, CurrentUser>();
+    builder.Services.AddHttpContextAccessor();
+    builder.Services.AddExceptionHandler<ProblemDetailsExceptionHandler>();
+    builder.Services.Configure<ApiBehaviorOptions>(options =>
+        options.SuppressModelStateInvalidFilter = true);
+    builder.Services.AddEndpointsApiExplorer();
+    builder.Services.AddOpenApi(/* ... */);
+    builder.Services.AddCors();
+}
+```
+
+`CurrentUser` implements `IUser` (declared in Application) by reading the current user's ID and roles from `IHttpContextAccessor`. This is the only place the Web layer crosses into HTTP context concerns.
+
+## Directory structure
+
+```
+Web/
+├── Endpoints/
+│   ├── TodoItems.cs
+│   ├── TodoLists.cs
+│   ├── Users.cs
+│   └── WeatherForecasts.cs
+├── Infrastructure/
+│   ├── ApiExceptionOperationTransformer.cs
+│   ├── BearerSecuritySchemeTransformer.cs
+│   ├── EndpointRouteBuilderExtensions.cs
+│   ├── IEndpointGroup.cs
+│   ├── ProblemDetailsExceptionHandler.cs
+│   └── WebApplicationExtensions.cs
+├── Services/
+│   └── CurrentUser.cs
+├── ClientApp/          ← Angular SPA source
+├── ClientApp-React/    ← React SPA source
+├── wwwroot/            ← built SPA output
+├── DependencyInjection.cs
+└── Program.cs
+```

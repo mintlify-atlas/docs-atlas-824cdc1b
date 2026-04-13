@@ -1,0 +1,49 @@
+---
+title: "ADR-003: MediatR.Contracts reference in Domain"
+description: "Why MediatR.Contracts is referenced in the Domain project, allowing BaseEvent to implement INotification and removing an adapter layer in Application."
+---
+
+Domain events need to participate in MediatR's pub/sub system without forcing an adapter between the Domain and Application layers. This record documents why `MediatR.Contracts` is referenced directly from the Domain project.
+
+<Note>
+  **Status: Accepted** — 2026-03-16
+</Note>
+
+## Context
+
+Domain events need to integrate with MediatR's pub/sub system, which is used in the Application layer to dispatch events after `SaveChangesAsync`. `BaseEvent` must satisfy MediatR's `INotification` marker interface for this to work. Clean Architecture requires the Domain layer to be free of external dependencies so that the domain model can evolve independently of frameworks and infrastructure.
+
+## Decision
+
+Reference `MediatR.Contracts` in the Domain project. `BaseEvent` implements `INotification` directly, making domain events first-class MediatR notifications without any adapter or mapping layer in the Application layer.
+
+```csharp
+// src/Domain/Common/BaseEvent.cs
+public abstract class BaseEvent : INotification
+{
+}
+```
+
+Domain events can then be published from Application handlers without conversion:
+
+```csharp
+await _mediator.Publish(domainEvent, cancellationToken);
+```
+
+## Rationale
+
+The alternative is to define a local marker interface (e.g. `IDomainEvent`) in Domain and adapt it to `INotification` in the Application layer before publishing through MediatR. This preserves the "zero external dependencies in Domain" ideal but adds an adapter that exists solely to paper over a seam between two interfaces with identical semantics.
+
+`MediatR.Contracts` contains only interface definitions — no implementation, no transitive dependencies, and it is stable across MediatR major versions. The coupling is real but minimal, and it eliminates an entire conversion layer that would otherwise need to be written and maintained.
+
+## Consequences
+
+<CardGroup cols={2}>
+  <Card title="Easier" icon="check">
+    - Domain events are directly publishable via `IMediator.Publish()` with no conversion step.
+    - If MediatR is ever replaced, `BaseEvent` and one package reference change — a single, contained update.
+  </Card>
+  <Card title="Harder" icon="triangle-exclamation">
+    - `Domain.csproj` has one NuGet dependency (`MediatR.Contracts`). The "zero NuGet dependencies" ideal is intentionally relaxed.
+  </Card>
+</CardGroup>

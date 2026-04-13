@@ -1,0 +1,144 @@
+---
+title: "Aspire orchestration for local development"
+description: "How .NET Aspire starts the database, backend, and frontend together and provides a dashboard with structured logs, traces, and health checks out of the box."
+---
+
+.NET Aspire is included by default in every solution variant. It replaces the manual setup that was previously required before running the application or tests: starting a database server, configuring connection strings, and launching multiple processes in the right order. With Aspire, a single command starts everything and a browser-based dashboard gives you live visibility into all running services.
+
+## Projects
+
+The solution includes two Aspire-related projects:
+
+| Project | Location | Purpose |
+|---|---|---|
+| `AppHost` | `src/AppHost/` | Orchestrates the full stack for local development and acceptance testing |
+| `TestAppHost` | `tests/TestAppHost/` | Orchestrates only the database for use by `Application.FunctionalTests` |
+| `ServiceDefaults` | `src/ServiceDefaults/` | Shared defaults: OpenTelemetry, health checks, service discovery, HTTP resilience |
+
+## Running the application
+
+<Steps>
+  <Step title="Ensure prerequisites are met">
+    Make sure the .NET SDK and Aspire workload are installed. For PostgreSQL or SQL Server variants, Docker Desktop must also be running. The SQLite variant (the default) does not require Docker.
+
+    ```bash
+    dotnet workload install aspire
+    ```
+  </Step>
+
+  <Step title="Start the AppHost">
+    From the solution root, run the AppHost project:
+
+    ```bash
+    dotnet run --project src/AppHost
+    ```
+
+    Aspire starts all configured resources in dependency order: the database first, then the backend (waiting for the database to be healthy), then the frontend dev server (waiting for the backend).
+  </Step>
+
+  <Step title="Open the Aspire dashboard">
+    The terminal output includes a dashboard URL — typically `http://localhost:15000` (HTTP) or `https://localhost:17000` (HTTPS). Open it in a browser.
+
+    The dashboard shows:
+    - **Resources** — running status, endpoints, and health of each service
+    - **Console logs** — structured log output from all resources in one place
+    - **Structured logs** — filterable, searchable log entries with trace correlation
+    - **Traces** — distributed traces across the backend and database calls
+    - **Metrics** — runtime metrics from ASP.NET Core and HttpClient instrumentation
+  </Step>
+
+  <Step title="Access the application">
+    The Aspire dashboard lists all external endpoints. For Angular and React variants, the frontend URL is shown as a resource endpoint. For the API-only variant, the dashboard includes a direct link labelled **Scalar API Reference** pointing at `/scalar`.
+  </Step>
+</Steps>
+
+<Note>
+  Docker is only required for the PostgreSQL and SQL Server variants. The default SQLite variant runs entirely without containers.
+</Note>
+
+## AppHost: orchestrating the stack
+
+`src/AppHost/Program.cs` defines all resources and their relationships. The database resource varies by provider:
+
+```csharp
+// SQLite (default — no container)
+var databaseServer = builder.AddSqlite(Services.Database);
+
+// PostgreSQL
+var databaseServer = builder
+    .AddAzurePostgresFlexibleServer(Services.DatabaseServer)
+    .WithPasswordAuthentication()
+    .RunAsContainer(container =>
+        container.WithLifetime(ContainerLifetime.Persistent))
+    .AddDatabase(Services.Database);
+
+// SQL Server
+var databaseServer = builder
+    .AddAzureSqlServer(Services.DatabaseServer)
+    .RunAsContainer(container =>
+        container.WithLifetime(ContainerLifetime.Persistent))
+    .AddDatabase(Services.Database);
+```
+
+The Web API project waits for the database to be healthy before starting:
+
+```csharp
+var web = builder.AddProject<Projects.Web>(Services.WebApi)
+    .WithReference(databaseServer)
+    .WaitFor(databaseServer)
+    .WithExternalHttpEndpoints();
+```
+
+For Angular and React variants, the JavaScript dev server is added as a `JavaScriptApp` resource that waits for the backend:
+
+```csharp
+builder.AddJavaScriptApp(Services.WebFrontend, "./../Web/ClientApp")
+    .WithRunScript("start")
+    .WithReference(web)
+    .WaitFor(web)
+    .WithHttpEndpoint(env: "PORT");
+```
+
+Connection strings and environment variables are injected by Aspire at runtime — you do not need to set `ConnectionStrings__CleanArchitectureDb` manually when running via the AppHost.
+
+## TestAppHost: self-contained functional tests
+
+`tests/TestAppHost/Program.cs` is a stripped-down AppHost that provisions only the database. It is used by `Application.FunctionalTests` to spin up a real database server before tests run, without any manual setup:
+
+```csharp
+// SQLite
+builder.AddSqlite(Services.Database);
+
+// PostgreSQL
+builder.AddPostgres(Services.DatabaseServer)
+    .AddDatabase(Services.Database);
+
+// SQL Server
+builder.AddSqlServer(Services.DatabaseServer)
+    .AddDatabase(Services.Database);
+```
+
+The functional test project references `TestAppHost` and uses Aspire's `DistributedApplicationTestingBuilder` to start and stop the database as part of the test lifecycle. [Respawn](https://github.com/jbogard/Respawn) resets the database state between individual tests. The result is that `dotnet test` is entirely self-contained — no database installation, no connection string configuration, no external processes to manage.
+
+## ServiceDefaults: shared observability baseline
+
+Every service project references `src/ServiceDefaults/` and calls `AddServiceDefaults()` during startup. This single call configures:
+
+- **OpenTelemetry** — logs, metrics, and traces exported via OTLP to the Aspire dashboard (and optionally to Azure Monitor)
+- **Health checks** — `/health` (readiness) and `/alive` (liveness) endpoints enabled in development
+- **Service discovery** — services reference each other by name rather than hardcoded URLs
+- **HTTP resilience** — standard resilience handler applied to all `HttpClient` instances by default
+
+```csharp
+// Configured automatically in ServiceDefaults/Extensions.cs
+builder.ConfigureOpenTelemetry();   // ASP.NET Core, HttpClient, and runtime metrics + traces
+builder.AddDefaultHealthChecks();   // liveness check at /alive
+builder.Services.AddServiceDiscovery();
+builder.Services.ConfigureHttpClientDefaults(http =>
+{
+    http.AddStandardResilienceHandler();
+    http.AddServiceDiscovery();
+});
+```
+
+These defaults are the same pattern generated by `dotnet new aspire-servicedefaults` and are intentionally kept close to the Aspire baseline so they remain easy to update as Aspire evolves.

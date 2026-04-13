@@ -1,0 +1,240 @@
+---
+title: "Add a CQRS feature end-to-end"
+description: "Walk through creating a command, validator, and endpoint from scratch using the Clean Architecture template's feature-per-folder convention."
+---
+
+Every user-facing capability in this template is expressed as a **feature**: a self-contained folder under `src/Application` that contains a command or query, its handler, and its validator. MediatR dispatches each request through a pipeline of behaviours before the handler runs, so cross-cutting concerns like validation, authorization, and logging are handled automatically. Adding a feature means writing those three files and wiring up a Minimal API endpoint in the `Web` layer — nothing else needs to change.
+
+<Note>
+  The template follows a **feature-per-folder** convention. Each operation lives in its own namespace under `src/Application/{Feature}/Commands/{OperationName}/` or `src/Application/{Feature}/Queries/{OperationName}/`. All files for that operation — command record, handler class, and validator — are colocated in the same folder. This keeps related code together and avoids large, sprawling files.
+</Note>
+
+## What you will build
+
+The walkthrough below adds a `CreateTodoList` feature (already present in the template as a reference). Follow the same pattern when building your own features.
+
+<Steps>
+  <Step title="Create or update a domain entity">
+    Domain entities live in `src/Domain/Entities`. They are plain C# classes with no framework dependencies. If the feature needs a new aggregate, add it there. If it updates an existing entity, add any new value objects or domain events in `src/Domain`.
+
+    ```csharp
+    // src/Domain/Entities/TodoList.cs (existing entity — shown for reference)
+    public class TodoList : BaseAuditableEntity
+    {
+        public string? Title { get; set; }
+        public Colour Colour { get; set; } = Colour.Grey;
+        public IList<TodoItem> Items { get; private set; } = new List<TodoItem>();
+    }
+    ```
+
+    The `BaseAuditableEntity` base class automatically stamps `Created`, `CreatedBy`, `LastModified`, and `LastModifiedBy` via the EF Core `SaveChangesInterceptor` in the Infrastructure layer. You do not need to set those fields manually.
+  </Step>
+
+  <Step title="Create a command with a handler">
+    Create a new folder under `src/Application/{Feature}/Commands/{OperationName}/`. Add a single `.cs` file that contains both the command record and its handler class. Co-locating them reduces file-switching when reading the code.
+
+    ```csharp
+    // src/Application/TodoLists/Commands/CreateTodoList/CreateTodoList.cs
+    using CleanArchitecture.Application.Common.Interfaces;
+    using CleanArchitecture.Domain.Entities;
+    using CleanArchitecture.Domain.ValueObjects;
+
+    namespace CleanArchitecture.Application.TodoLists.Commands.CreateTodoList;
+
+    public record CreateTodoListCommand : IRequest<int>
+    {
+        public string? Title { get; init; }
+
+        public string? Colour { get; init; }
+    }
+
+    public class CreateTodoListCommandHandler : IRequestHandler<CreateTodoListCommand, int>
+    {
+        private readonly IApplicationDbContext _context;
+
+        public CreateTodoListCommandHandler(IApplicationDbContext context)
+        {
+            _context = context;
+        }
+
+        public async Task<int> Handle(CreateTodoListCommand request, CancellationToken cancellationToken)
+        {
+            var entity = new TodoList
+            {
+                Title = request.Title,
+                Colour = Colour.From(request.Colour ?? Colour.Grey)
+            };
+
+            _context.TodoLists.Add(entity);
+
+            await _context.SaveChangesAsync(cancellationToken);
+
+            return entity.Id;
+        }
+    }
+    ```
+
+    Key points:
+    - The command is a `record` so it is immutable by default and has structural equality for free.
+    - `IRequest<int>` tells MediatR to expect an `int` return value (the new entity's ID).
+    - The handler depends only on `IApplicationDbContext`, the application-layer interface for the database. It never references EF Core types directly, keeping the Application layer infrastructure-agnostic.
+    - For commands that return nothing, use `IRequest` and `IRequestHandler<TCommand>` (no type parameter).
+  </Step>
+
+  <Step title="Add a validator">
+    Create a validator in the same folder. FluentValidation validators are discovered and injected automatically by the DI registration in `DependencyInjection.cs`. The `ValidationBehaviour` in the MediatR pipeline calls every registered `IValidator<TRequest>` before the handler runs.
+
+    ```csharp
+    // src/Application/TodoLists/Commands/CreateTodoList/CreateTodoListCommandValidator.cs
+    using CleanArchitecture.Application.Common.Interfaces;
+
+    namespace CleanArchitecture.Application.TodoLists.Commands.CreateTodoList;
+
+    public class CreateTodoListCommandValidator : AbstractValidator<CreateTodoListCommand>
+    {
+        private readonly IApplicationDbContext _context;
+
+        public CreateTodoListCommandValidator(IApplicationDbContext context)
+        {
+            _context = context;
+
+            RuleFor(v => v.Title)
+                .NotEmpty()
+                .MaximumLength(200)
+                .MustAsync(BeUniqueTitle)
+                    .WithMessage("'{PropertyName}' must be unique.")
+                    .WithErrorCode("Unique");
+        }
+
+        public async Task<bool> BeUniqueTitle(string title, CancellationToken cancellationToken)
+        {
+            return !await _context.TodoLists
+                .AnyAsync(l => l.Title == title, cancellationToken);
+        }
+    }
+    ```
+
+    The validator can take dependencies through its constructor — here it receives `IApplicationDbContext` to perform a database uniqueness check. If validation fails, a `ValidationException` is thrown by the pipeline and mapped to an HTTP 400 response automatically.
+  </Step>
+
+  <Step title="Create a Minimal API endpoint">
+    Endpoints live in `src/Web/Endpoints/`. Each file implements `IEndpointGroup` and is auto-discovered by `WebApplicationExtensions.MapEndpoints`. The route prefix defaults to `/api/{ClassName}`.
+
+    ```csharp
+    // src/Web/Endpoints/TodoLists.cs
+    using CleanArchitecture.Application.TodoLists.Commands.CreateTodoList;
+    using CleanArchitecture.Application.TodoLists.Commands.DeleteTodoList;
+    using CleanArchitecture.Application.TodoLists.Commands.UpdateTodoList;
+    using CleanArchitecture.Application.TodoLists.Queries.GetTodos;
+    using Microsoft.AspNetCore.Http.HttpResults;
+
+    namespace CleanArchitecture.Web.Endpoints;
+
+    public class TodoLists : IEndpointGroup
+    {
+        public static void Map(RouteGroupBuilder groupBuilder)
+        {
+            groupBuilder.RequireAuthorization();
+
+            groupBuilder.MapGet(GetTodoLists);
+            groupBuilder.MapPost(CreateTodoList);
+            groupBuilder.MapPut(UpdateTodoList, "{id}");
+            groupBuilder.MapDelete(DeleteTodoList, "{id}");
+        }
+
+        [EndpointSummary("Get all Todo Lists")]
+        [EndpointDescription("Retrieves all todo lists along with their items.")]
+        public static async Task<Ok<TodosVm>> GetTodoLists(ISender sender)
+        {
+            var vm = await sender.Send(new GetTodosQuery());
+            return TypedResults.Ok(vm);
+        }
+
+        [EndpointSummary("Create a new Todo List")]
+        [EndpointDescription("Creates a new todo list and returns the ID of the created list.")]
+        public static async Task<Created<int>> CreateTodoList(ISender sender, CreateTodoListCommand command)
+        {
+            var id = await sender.Send(command);
+            return TypedResults.Created($"/{nameof(TodoLists)}/{id}", id);
+        }
+
+        public static async Task<Results<NoContent, BadRequest>> UpdateTodoList(
+            ISender sender, int id, UpdateTodoListCommand command)
+        {
+            if (id != command.Id) return TypedResults.BadRequest();
+            await sender.Send(command);
+            return TypedResults.NoContent();
+        }
+
+        public static async Task<NoContent> DeleteTodoList(ISender sender, int id)
+        {
+            await sender.Send(new DeleteTodoListCommand(id));
+            return TypedResults.NoContent();
+        }
+    }
+    ```
+
+    The endpoint delegates immediately to `ISender.Send()`. There is no business logic here. `ISender` is the MediatR interface; injecting it (rather than concrete handlers) keeps the Web layer loosely coupled and allows the full pipeline — including validation and authorization behaviours — to execute on every request.
+  </Step>
+
+  <Step title="Write a functional test">
+    Functional tests live in `tests/Application.FunctionalTests/`. They inherit from `TestBase`, which resets the database before each test. Commands are sent through the real MediatR pipeline against a real database (SQLite by default, provisioned via .NET Aspire).
+
+    ```csharp
+    // tests/Application.FunctionalTests/TodoLists/Commands/CreateTodoListTests.cs
+    using CleanArchitecture.Application.Common.Exceptions;
+    using CleanArchitecture.Application.TodoLists.Commands.CreateTodoList;
+    using CleanArchitecture.Domain.Entities;
+
+    namespace CleanArchitecture.Application.FunctionalTests.TodoLists.Commands;
+
+    public class CreateTodoListTests : TestBase
+    {
+        [Test]
+        public async Task ShouldRequireMinimumFields()
+        {
+            var command = new CreateTodoListCommand();
+            await Should.ThrowAsync<ValidationException>(() => TestApp.SendAsync(command));
+        }
+
+        [Test]
+        public async Task ShouldRequireUniqueTitle()
+        {
+            await TestApp.SendAsync(new CreateTodoListCommand { Title = "Shopping" });
+
+            var command = new CreateTodoListCommand { Title = "Shopping" };
+            await Should.ThrowAsync<ValidationException>(() => TestApp.SendAsync(command));
+        }
+
+        [Test]
+        public async Task ShouldCreateTodoList()
+        {
+            var userId = await TestApp.RunAsDefaultUserAsync();
+
+            var command = new CreateTodoListCommand { Title = "Tasks" };
+            var id = await TestApp.SendAsync(command);
+
+            var list = await TestApp.FindAsync<TodoList>(id);
+
+            list.ShouldNotBeNull();
+            list!.Title.ShouldBe(command.Title);
+            list.CreatedBy.ShouldBe(userId);
+            list.Created.ShouldBe(DateTime.Now, TimeSpan.FromMilliseconds(10000));
+        }
+    }
+    ```
+
+    Use `TestApp.RunAsDefaultUserAsync()` to authenticate before sending commands that require an authenticated user. Use `TestApp.FindAsync<TEntity>(id)` to read the resulting database state directly.
+  </Step>
+</Steps>
+
+## Summary: files created per feature
+
+| File | Purpose |
+|------|---------|
+| `src/Application/{Feature}/Commands/{Op}/{Op}.cs` | Command record + handler |
+| `src/Application/{Feature}/Commands/{Op}/{Op}CommandValidator.cs` | FluentValidation validator |
+| `src/Web/Endpoints/{Feature}.cs` | Minimal API endpoint group |
+| `tests/Application.FunctionalTests/{Feature}/Commands/{Op}Tests.cs` | Functional test class |
+
+For read operations, replace `Commands` with `Queries` and return a DTO or view model from the handler. The query file follows exactly the same layout — record + handler in the same file — with `IRequest<TResult>` as the interface.

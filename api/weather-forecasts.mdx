@@ -1,0 +1,95 @@
+---
+title: 'Weather Forecasts API endpoint'
+description: 'A sample authenticated endpoint returning five days of randomly generated weather forecast data to demonstrate the Clean Architecture pattern.'
+keywords: ['weather forecasts', 'api', 'sample', 'demo', 'clean architecture']
+---
+
+The Weather Forecasts endpoint is a sample endpoint included in the template to demonstrate how a query flows through the Clean Architecture layers from the HTTP endpoint down to the application handler. It generates five days of random forecast data on each request — it does not connect to any real weather service.
+
+The endpoint exists primarily as a reference for building your own feature slices and can be safely removed once you understand the pattern.
+
+---
+
+## GET /api/WeatherForecasts
+
+Returns an array of five weather forecasts starting from tomorrow, each with a date, temperature in Celsius, a derived temperature in Fahrenheit, and a randomly chosen summary string.
+
+**Authentication:** required  
+**Returns:** `200 OK` with an array of `WeatherForecast` objects
+
+<Tabs>
+  <Tab title="Request">
+    ```bash
+    curl https://localhost:5001/api/WeatherForecasts \
+      -H "Authorization: Bearer <token>"
+    ```
+  </Tab>
+  <Tab title="Response">
+    ```json
+    [
+      {
+        "date": "2026-04-14T10:23:45.123Z",
+        "temperatureC": 12,
+        "temperatureF": 53,
+        "summary": "Cool"
+      },
+      {
+        "date": "2026-04-15T10:23:45.123Z",
+        "temperatureC": -3,
+        "temperatureF": 26,
+        "summary": "Freezing"
+      },
+      {
+        "date": "2026-04-16T10:23:45.123Z",
+        "temperatureC": 34,
+        "temperatureF": 93,
+        "summary": "Scorching"
+      },
+      {
+        "date": "2026-04-17T10:23:45.123Z",
+        "temperatureC": 21,
+        "temperatureF": 69,
+        "summary": "Warm"
+      },
+      {
+        "date": "2026-04-18T10:23:45.123Z",
+        "temperatureC": 7,
+        "temperatureF": 44,
+        "summary": "Chilly"
+      }
+    ]
+    ```
+  </Tab>
+</Tabs>
+
+### Response shape — WeatherForecast
+
+<ResponseField name="date" type="string (ISO 8601 datetime)">
+  The date of the forecast. Always one to five days in the future relative to the time of the request.
+</ResponseField>
+
+<ResponseField name="temperatureC" type="integer">
+  Temperature in degrees Celsius. Randomly generated in the range −20 to 54.
+</ResponseField>
+
+<ResponseField name="temperatureF" type="integer">
+  Temperature in degrees Fahrenheit, derived from `temperatureC` using `32 + (int)(temperatureC / 0.5556)`.
+</ResponseField>
+
+<ResponseField name="summary" type="string">
+  A human-readable description of the forecast. One of: `Freezing`, `Bracing`, `Chilly`, `Cool`, `Mild`, `Warm`, `Balmy`, `Hot`, `Sweltering`, `Scorching`.
+</ResponseField>
+
+<Note>
+  The data is generated in-memory using `System.Random` and is different on every request. There is no caching, persistence, or external data source involved.
+</Note>
+
+## How the endpoint is structured
+
+The endpoint follows the same Clean Architecture pattern used throughout the template:
+
+1. **HTTP layer** — `WeatherForecasts.cs` maps `GET /api/WeatherForecasts` to a handler method that dispatches a `GetWeatherForecastsQuery` via MediatR.
+2. **Application layer** — `GetWeatherForecastsQueryHandler` generates the random forecast list and returns it as `IEnumerable<WeatherForecast>`.
+3. **No infrastructure dependency** — because the data is synthetic, the handler does not depend on `IApplicationDbContext` or any external service, making it useful as a minimal working example.
+
+This same three-layer flow — minimal API endpoint, MediatR query, handler — is the pattern you replicate when adding new features to the template.

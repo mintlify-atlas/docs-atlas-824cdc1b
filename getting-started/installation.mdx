@@ -1,0 +1,135 @@
+---
+title: "Install the Clean Architecture template"
+description: "Install the .NET template from NuGet, then create a solution with your choice of Angular, React, or API-only frontend and SQLite, PostgreSQL, or SQL Server."
+---
+
+This page walks you through installing the Clean Architecture Solution Template and generating a new solution. By the end you will have a scaffolded .NET solution on your machine, ready to run.
+
+## Prerequisites
+
+Before you install the template, make sure you have the following tools available:
+
+| Tool | Required | Notes |
+|---|---|---|
+| [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) | Always | Version 10.0.201 or later |
+| [Node.js](https://nodejs.org/) LTS | Angular or React only | Not needed for API-only projects |
+| [Docker Desktop](https://www.docker.com/products/docker-desktop/) or [Podman](https://podman.io/) | PostgreSQL or SQL Server only | Not needed when using SQLite (the default) |
+
+<Note>
+  SQLite is the default database provider and requires no Docker container. If you are getting started for the first time, use SQLite to keep setup simple.
+</Note>
+
+## Install the template
+
+<Steps>
+  <Step title="Install the NuGet template">
+    Run the following command to install the template from NuGet:
+
+    ```bash
+    dotnet new install Clean.Architecture.Solution.Template
+    ```
+
+    This registers the `ca-sln` short name globally in your `dotnet new` command.
+  </Step>
+
+  <Step title="Choose your options">
+    The template accepts two parameters. Both have sensible defaults so you can omit them if you want a quick start.
+
+    | Option | Flag | Values | Default |
+    |---|---|---|---|
+    | Client framework | `--client-framework` / `-cf` | `angular`, `react`, `none` | `angular` |
+    | Database provider | `--database` / `-db` | `postgresql`, `sqlite`, `sqlserver` | `sqlite` |
+
+    Pass `--help` to see every available option:
+
+    ```bash
+    dotnet new ca-sln --help
+    ```
+  </Step>
+
+  <Step title="Create your solution">
+    Run `dotnet new ca-sln` with your chosen options. Replace `YourProjectName` with your solution name.
+
+    <Tabs>
+      <Tab title="Angular">
+        <CodeGroup>
+
+        ```bash Angular + SQLite (no Docker)
+        dotnet new ca-sln -cf angular -db sqlite -o YourProjectName
+        ```
+
+        ```bash Angular + PostgreSQL (requires Docker)
+        dotnet new ca-sln -cf angular -db postgresql -o YourProjectName
+        ```
+
+        ```bash Angular + SQL Server (requires Docker)
+        dotnet new ca-sln -cf angular -db sqlserver -o YourProjectName
+        ```
+
+        </CodeGroup>
+      </Tab>
+      <Tab title="React">
+        <CodeGroup>
+
+        ```bash React + SQLite (no Docker)
+        dotnet new ca-sln -cf react -db sqlite -o YourProjectName
+        ```
+
+        ```bash React + PostgreSQL (requires Docker)
+        dotnet new ca-sln -cf react -db postgresql -o YourProjectName
+        ```
+
+        ```bash React + SQL Server (requires Docker)
+        dotnet new ca-sln -cf react -db sqlserver -o YourProjectName
+        ```
+
+        </CodeGroup>
+      </Tab>
+      <Tab title="API only">
+        <CodeGroup>
+
+        ```bash API only + SQLite (no Docker)
+        dotnet new ca-sln -cf none -db sqlite -o YourProjectName
+        ```
+
+        ```bash API only + PostgreSQL (requires Docker)
+        dotnet new ca-sln -cf none -db postgresql -o YourProjectName
+        ```
+
+        ```bash API only + SQL Server (requires Docker)
+        dotnet new ca-sln -cf none -db sqlserver -o YourProjectName
+        ```
+
+        </CodeGroup>
+      </Tab>
+    </Tabs>
+
+    <Warning>
+      PostgreSQL and SQL Server solutions start a container automatically via Aspire when you run the app. Make sure Docker Desktop (or Podman) is running before you proceed.
+    </Warning>
+  </Step>
+</Steps>
+
+## Common combinations
+
+The three most popular starting points, as shown in the README, are:
+
+<CodeGroup>
+
+```bash Angular + PostgreSQL
+dotnet new ca-sln -cf angular -db postgresql -o YourProjectName
+```
+
+```bash React + SQL Server
+dotnet new ca-sln -cf react -db sqlserver -o YourProjectName
+```
+
+```bash API only + SQLite
+dotnet new ca-sln -cf none -db sqlite -o YourProjectName
+```
+
+</CodeGroup>
+
+## Next step
+
+With your solution created, follow the [quickstart guide](/getting-started/quickstart) to run the app and explore the Aspire dashboard.

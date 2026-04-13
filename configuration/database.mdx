@@ -1,0 +1,150 @@
+---
+title: "Configure the database provider"
+description: "Choose SQLite, PostgreSQL, or SQL Server via --database. Each option configures EF Core, connection strings, and test infrastructure automatically."
+---
+
+The template supports three database providers: **SQLite**, **PostgreSQL**, and **SQL Server**. The choice is made once at generation time via a template parameter — the provider is baked into `DependencyInjection.cs`, the `AppHost`, and the functional test infrastructure. You cannot switch providers after generating a solution; create a new solution with the desired `--database` flag instead.
+
+## Choosing a provider
+
+<Tabs>
+  <Tab title="SQLite">
+    SQLite is the default provider and the recommended starting point. It requires no external server and no Docker — the database is a single file on disk. It is ideal for getting started quickly and for CI environments without container support.
+
+    ```bash
+    dotnet new ca-sln --name MyApp
+    # or explicitly:
+    dotnet new ca-sln --name MyApp --database sqlite
+    ```
+
+    **Connection string** (`src/Web/appsettings.json`):
+
+    ```json
+    {
+      "ConnectionStrings": {
+        "CleanArchitectureDb": "DataSource=CleanArchitecture.db;Cache=Shared"
+      }
+    }
+    ```
+
+    The Aspire `AppHost` uses the `CommunityToolkit.Aspire.Hosting.SQLite` package and does not spin up any container.
+
+    <Note>
+      SQLite is the only variant that does not require Docker Desktop. If you are evaluating the template or running in a restricted environment, start here.
+    </Note>
+  </Tab>
+
+  <Tab title="PostgreSQL">
+    The PostgreSQL variant configures Npgsql, provisions a persistent container via Aspire's Azure PostgreSQL Flexible Server integration (running locally as a Docker container), and wires up both the development AppHost and the `TestAppHost` used by functional tests.
+
+    ```bash
+    dotnet new ca-sln --name MyApp --database postgresql
+    ```
+
+    **Connection string** (`src/Web/appsettings.json`):
+
+    ```json
+    {
+      "ConnectionStrings": {
+        "CleanArchitectureDb": "Server=127.0.0.1;Port=5432;Database=CleanArchitectureDb;Username=admin;Password=password;"
+      }
+    }
+    ```
+
+    When running via Aspire (`dotnet run --project src/AppHost`), the connection string is injected automatically by the orchestrator — you do not need to set it manually. The appsettings value is used when running `src/Web` directly without Aspire.
+
+    The `AppHost` registers the database with a persistent container lifetime so the data survives across restarts:
+
+    ```csharp
+    var databaseServer = builder
+        .AddAzurePostgresFlexibleServer(Services.DatabaseServer)
+        .WithPasswordAuthentication()
+        .RunAsContainer(container =>
+            container.WithLifetime(ContainerLifetime.Persistent))
+        .AddDatabase(Services.Database);
+    ```
+
+    <Warning>
+      Docker Desktop (or a compatible container runtime) must be running before you start the application or run tests with the PostgreSQL variant.
+    </Warning>
+  </Tab>
+
+  <Tab title="SQL Server">
+    The SQL Server variant configures `Microsoft.EntityFrameworkCore.SqlServer`, provisions a container via Aspire's Azure SQL integration, and sets up the corresponding functional test infrastructure.
+
+    ```bash
+    dotnet new ca-sln --name MyApp --database sqlserver
+    ```
+
+    **Connection string** (`src/Web/appsettings.json`):
+
+    ```json
+    {
+      "ConnectionStrings": {
+        "CleanArchitectureDb": "Server=(localdb)\\mssqllocaldb;Database=CleanArchitectureDb;Trusted_Connection=True;MultipleActiveResultSets=true"
+      }
+    }
+    ```
+
+    As with PostgreSQL, running via Aspire replaces the appsettings connection string with one injected by the orchestrator. The manual connection string targets LocalDB for cases where you run the web project directly.
+
+    The `AppHost` wires up a persistent SQL Server container:
+
+    ```csharp
+    var databaseServer = builder
+        .AddAzureSqlServer(Services.DatabaseServer)
+        .RunAsContainer(container =>
+            container.WithLifetime(ContainerLifetime.Persistent))
+        .AddDatabase(Services.Database);
+    ```
+
+    <Warning>
+      Docker Desktop (or a compatible container runtime) must be running before you start the application or run tests with the SQL Server variant.
+    </Warning>
+  </Tab>
+</Tabs>
+
+## How the provider is selected at runtime
+
+`src/Infrastructure/DependencyInjection.cs` uses compile-time `#if` directives emitted by the template to call the correct EF Core provider method:
+
+```csharp
+builder.Services.AddDbContext<ApplicationDbContext>((sp, options) =>
+{
+    options.AddInterceptors(sp.GetServices<ISaveChangesInterceptor>());
+#if (UsePostgreSQL)
+    options.UseNpgsql(connectionString);
+#elif (UseSqlServer)
+    options.UseSqlServer(connectionString);
+#else
+    options.UseSqlite(connectionString);
+#endif
+});
+```
+
+The connection string name is always `CleanArchitectureDb`, resolved from `IConfiguration.GetConnectionString`. In generated projects all three blocks collapse to a single provider call — there are no conditional branches at runtime.
+
+## The `IApplicationDbContext` interface
+
+The Application layer never references `ApplicationDbContext` or any provider type directly. All command and query handlers interact with the database through `IApplicationDbContext`, defined in `src/Application/Common/Interfaces/IApplicationDbContext.cs`:
+
+```csharp
+public interface IApplicationDbContext
+{
+    DbSet<TodoList> TodoLists { get; }
+    DbSet<TodoItem> TodoItems { get; }
+    Task<int> SaveChangesAsync(CancellationToken cancellationToken);
+}
+```
+
+`ApplicationDbContext` in the Infrastructure layer implements this interface. The provider-specific code — `UseNpgsql`, `UseSqlServer`, `UseSqlite` — lives entirely in Infrastructure. This is the abstraction boundary that makes the provider choice a deployment detail rather than a domain concern.
+
+## Switching providers after generation
+
+The template does not support migrating an existing solution from one provider to another. The `--database` choice affects generated files, NuGet package references, EF Core migrations, and test infrastructure that cannot be patched in place.
+
+To change provider, generate a new solution with the desired flag and migrate your domain logic, application handlers, and any customisations manually:
+
+```bash
+dotnet new ca-sln --name MyApp --database postgresql
+```

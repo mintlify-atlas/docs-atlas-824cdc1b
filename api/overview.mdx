@@ -1,0 +1,102 @@
+---
+title: 'REST API overview and authentication'
+description: 'A Scalar-documented ASP.NET Core minimal API secured with JWT bearer tokens via ASP.NET Core Identity. All resource endpoints require authentication.'
+keywords: ['api', 'rest', 'authentication', 'jwt', 'bearer', 'scalar', 'openapi']
+---
+
+The Clean Architecture template ships a REST API built with ASP.NET Core minimal APIs. Every endpoint group is auto-discovered and registered under `/api/{GroupName}`, and the full API surface is described by an OpenAPI document rendered as an interactive Scalar UI. All resource endpoints require a valid JWT bearer token obtained through the built-in ASP.NET Core Identity endpoints.
+
+## Exploring the API with Scalar
+
+When the application is running locally, the interactive Scalar documentation is available at:
+
+```
+https://localhost:5001/scalar
+```
+
+Scalar reads the OpenAPI document generated at runtime and lets you authenticate, inspect request/response schemas, and execute calls directly from the browser. The Bearer security scheme is wired up automatically via `BearerSecuritySchemeTransformer`, so once you paste a token into the Scalar auth dialog, every subsequent request in the UI will carry the correct header.
+
+## Authentication
+
+The template uses ASP.NET Core Identity with JWT bearer tokens. The `/api/Users` endpoint group, provided by `MapIdentityApi<ApplicationUser>()`, handles registration, login, and token refresh without any additional code.
+
+<Steps>
+  <Step title="Register an account">
+    Send a `POST` request to `/api/Users/register` with your email and password.
+
+    ```bash
+    curl -X POST https://localhost:5001/api/Users/register \
+      -H "Content-Type: application/json" \
+      -d '{"email": "you@example.com", "password": "YourP@ssword1!"}'
+    ```
+  </Step>
+
+  <Step title="Log in and get a token">
+    Send a `POST` request to `/api/Users/login`. The response contains an `accessToken` and a `refreshToken`.
+
+    ```bash
+    curl -X POST https://localhost:5001/api/Users/login \
+      -H "Content-Type: application/json" \
+      -d '{"email": "you@example.com", "password": "YourP@ssword1!"}'
+    ```
+
+    ```json
+    {
+      "tokenType": "Bearer",
+      "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+      "expiresIn": 3600,
+      "refreshToken": "abc123..."
+    }
+    ```
+  </Step>
+
+  <Step title="Pass the token in requests">
+    Include the `accessToken` as a bearer token in the `Authorization` header of every subsequent request.
+
+    ```bash
+    curl https://localhost:5001/api/TodoLists \
+      -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  The template seeds a default administrator account on first run. You can use `administrator@localhost` / `Administrator1!` to log in immediately without registering a new account.
+</Note>
+
+## Authorization requirements
+
+Every endpoint group calls `groupBuilder.RequireAuthorization()` in its `Map` method, meaning a missing or invalid token results in a `401 Unauthorized` response. Requests that pass authentication but lack the required permissions receive `403 Forbidden`.
+
+Error responses follow the RFC 9110 Problem Details format:
+
+```json
+{
+  "type": "https://tools.ietf.org/html/rfc9110#section-15.5.2",
+  "title": "Unauthorized",
+  "status": 401
+}
+```
+
+Validation failures return `400 Bad Request` with a `ValidationProblemDetails` body that lists each invalid field.
+
+## Endpoint groups
+
+<CardGroup cols={2}>
+  <Card title="Todo Lists" icon="list" href="/api/todo-lists">
+    Create, read, update, and delete todo lists. Returns full view models including priority levels and colour options.
+  </Card>
+  <Card title="Todo Items" icon="check-square" href="/api/todo-items">
+    Create, update, patch details, and delete individual todo items within a list.
+  </Card>
+  <Card title="Weather Forecasts" icon="cloud" href="/api/weather-forecasts">
+    Sample endpoint returning five days of randomly generated weather forecast data.
+  </Card>
+  <Card title="Users" icon="user" href="/api/users">
+    ASP.NET Core Identity endpoints for registration, login, token refresh, and logout.
+  </Card>
+</CardGroup>
+
+## Base URL
+
+All examples in this reference use `https://localhost:5001`. Replace this with your deployed URL in production.

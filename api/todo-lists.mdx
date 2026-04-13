@@ -1,0 +1,287 @@
+---
+title: 'Todo Lists API endpoints'
+description: 'CRUD endpoints for managing todo lists, including creation, retrieval, update, and deletion. All endpoints require a valid JWT bearer token.'
+keywords: ['todo lists', 'api', 'crud', 'endpoints', 'clean architecture']
+---
+
+The Todo Lists endpoints let authenticated users manage their collections of todo items. `GET /api/TodoLists` returns a complete view model containing all lists with their items, the available priority levels, and the supported colour options. The remaining endpoints handle creating, updating, and deleting individual lists.
+
+All four endpoints require authentication. Requests without a valid `Authorization: Bearer <token>` header receive `401 Unauthorized`.
+
+---
+
+## GET /api/TodoLists
+
+Retrieves all todo lists belonging to the authenticated user, ordered alphabetically by title, together with their items and the reference data needed to render a full UI (priority levels and colours).
+
+**Authentication:** required  
+**Returns:** `200 OK` with a `TodosVm` body
+
+<Tabs>
+  <Tab title="Request">
+    ```bash
+    curl https://localhost:5001/api/TodoLists \
+      -H "Authorization: Bearer <token>"
+    ```
+  </Tab>
+  <Tab title="Response">
+    ```json
+    {
+      "priorityLevels": [
+        { "id": 0, "title": "None" },
+        { "id": 1, "title": "Low" },
+        { "id": 2, "title": "Medium" },
+        { "id": 3, "title": "High" }
+      ],
+      "colours": [
+        { "code": "#78909C", "name": "Grey" },
+        { "code": "#AB47BC", "name": "Purple" },
+        { "code": "#5C6BC0", "name": "Blue" },
+        { "code": "#26A69A", "name": "Teal" },
+        { "code": "#4CAF50", "name": "Green" },
+        { "code": "#D98B2B", "name": "Orange" },
+        { "code": "#E05C4D", "name": "Red" }
+      ],
+      "lists": [
+        {
+          "id": 1,
+          "title": "Shopping",
+          "colour": "#4CAF50",
+          "items": [
+            {
+              "id": 1,
+              "listId": 1,
+              "title": "Milk",
+              "done": false,
+              "priority": 1,
+              "note": null
+            }
+          ]
+        }
+      ]
+    }
+    ```
+  </Tab>
+</Tabs>
+
+### Response shape — TodosVm
+
+<ResponseField name="priorityLevels" type="LookupDto[]">
+  All available priority levels as id/title pairs.
+  <Expandable title="LookupDto properties">
+    <ResponseField name="id" type="integer">
+      Numeric value of the priority level (0–3).
+    </ResponseField>
+    <ResponseField name="title" type="string">
+      Display name: `None`, `Low`, `Medium`, or `High`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="colours" type="ColourDto[]">
+  All supported list colours as hex code/name pairs.
+  <Expandable title="ColourDto properties">
+    <ResponseField name="code" type="string">
+      Hex colour code, e.g. `#4CAF50`.
+    </ResponseField>
+    <ResponseField name="name" type="string">
+      Human-readable name: `Grey`, `Purple`, `Blue`, `Teal`, `Green`, `Orange`, or `Red`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="lists" type="TodoListDto[]">
+  All todo lists ordered alphabetically by title.
+  <Expandable title="TodoListDto properties">
+    <ResponseField name="id" type="integer">
+      Unique identifier for the list.
+    </ResponseField>
+    <ResponseField name="title" type="string">
+      Display title of the list.
+    </ResponseField>
+    <ResponseField name="colour" type="string">
+      Hex colour code assigned to the list (defaults to `#78909C` / Grey).
+    </ResponseField>
+    <ResponseField name="items" type="TodoItemDto[]">
+      Items belonging to this list.
+      <Expandable title="TodoItemDto properties">
+        <ResponseField name="id" type="integer">Unique identifier for the item.</ResponseField>
+        <ResponseField name="listId" type="integer">ID of the parent list.</ResponseField>
+        <ResponseField name="title" type="string">Display title of the item.</ResponseField>
+        <ResponseField name="done" type="boolean">Whether the item has been completed.</ResponseField>
+        <ResponseField name="priority" type="integer">Priority level as an integer (0 = None, 1 = Low, 2 = Medium, 3 = High).</ResponseField>
+        <ResponseField name="note" type="string">Optional free-text note attached to the item.</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+## POST /api/TodoLists
+
+Creates a new todo list and returns the ID of the newly created record.
+
+**Authentication:** required  
+**Returns:** `201 Created` with the new list `id` in the body, and a `Location` header pointing to the new resource
+
+### Request body
+
+<ParamField body="title" type="string" required>
+  Title of the todo list. Must be non-empty, at most 200 characters, and unique across all existing lists.
+</ParamField>
+
+<ParamField body="colour" type="string">
+  Hex colour code for the list. Must be one of the seven supported values. Defaults to `#78909C` (Grey) when omitted.
+</ParamField>
+
+<Tabs>
+  <Tab title="Request">
+    ```bash
+    curl -X POST https://localhost:5001/api/TodoLists \
+      -H "Authorization: Bearer <token>" \
+      -H "Content-Type: application/json" \
+      -d '{"title": "Backlog", "colour": "#5C6BC0"}'
+    ```
+  </Tab>
+  <Tab title="Response">
+    **201 Created**
+
+    ```
+    Location: /TodoLists/3
+    ```
+
+    ```json
+    3
+    ```
+  </Tab>
+  <Tab title="Validation error">
+    **400 Bad Request** — returned when `title` is empty, exceeds 200 characters, or is not unique.
+
+    ```json
+    {
+      "type": "https://tools.ietf.org/html/rfc9110#section-15.5.1",
+      "title": "One or more validation errors occurred.",
+      "status": 400,
+      "errors": {
+        "Title": ["'Title' must be unique."]
+      }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## PUT /api/TodoLists/{id}
+
+Updates the title and/or colour of an existing todo list. The `id` in the URL path must match the `id` field in the request body; a mismatch returns `400 Bad Request` immediately.
+
+**Authentication:** required  
+**Returns:** `204 No Content` on success, `400 Bad Request` on ID mismatch or validation failure
+
+### Path parameter
+
+<ParamField path="id" type="integer" required>
+  The ID of the todo list to update.
+</ParamField>
+
+### Request body
+
+<ParamField body="id" type="integer" required>
+  Must match the `{id}` path parameter.
+</ParamField>
+
+<ParamField body="title" type="string" required>
+  New title. Must be non-empty, at most 200 characters, and unique among lists other than this one.
+</ParamField>
+
+<ParamField body="colour" type="string">
+  New hex colour code. Must be one of the seven supported values. Omit to leave the colour unchanged.
+</ParamField>
+
+<Tabs>
+  <Tab title="Request">
+    ```bash
+    curl -X PUT https://localhost:5001/api/TodoLists/1 \
+      -H "Authorization: Bearer <token>" \
+      -H "Content-Type: application/json" \
+      -d '{"id": 1, "title": "Product Backlog", "colour": "#26A69A"}'
+    ```
+  </Tab>
+  <Tab title="Response">
+    **204 No Content** — no body returned.
+  </Tab>
+  <Tab title="Error responses">
+    **400 Bad Request** — ID mismatch:
+
+    ```json
+    {}
+    ```
+
+    **400 Bad Request** — validation failure:
+
+    ```json
+    {
+      "type": "https://tools.ietf.org/html/rfc9110#section-15.5.1",
+      "title": "One or more validation errors occurred.",
+      "status": 400,
+      "errors": {
+        "Title": ["'Title' must not be empty."]
+      }
+    }
+    ```
+
+    **404 Not Found** — list with the given ID does not exist:
+
+    ```json
+    {
+      "type": "https://tools.ietf.org/html/rfc9110#section-15.5.5",
+      "title": "The specified resource was not found.",
+      "status": 404
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## DELETE /api/TodoLists/{id}
+
+Permanently deletes a todo list and all of its items.
+
+**Authentication:** required  
+**Returns:** `204 No Content` on success
+
+### Path parameter
+
+<ParamField path="id" type="integer" required>
+  The ID of the todo list to delete.
+</ParamField>
+
+<Tabs>
+  <Tab title="Request">
+    ```bash
+    curl -X DELETE https://localhost:5001/api/TodoLists/1 \
+      -H "Authorization: Bearer <token>"
+    ```
+  </Tab>
+  <Tab title="Response">
+    **204 No Content** — no body returned.
+  </Tab>
+  <Tab title="Error responses">
+    **404 Not Found** — list with the given ID does not exist:
+
+    ```json
+    {
+      "type": "https://tools.ietf.org/html/rfc9110#section-15.5.5",
+      "title": "The specified resource was not found.",
+      "status": 404
+    }
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+  Deleting a list removes all items it contains. This action cannot be undone.
+</Warning>

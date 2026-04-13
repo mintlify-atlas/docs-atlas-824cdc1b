@@ -1,0 +1,104 @@
+{
+  "projectType": "framework",
+  "projectName": "Clean Architecture Solution Template",
+  "projectDescription": "A .NET solution template for building enterprise ASP.NET Core applications using Clean Architecture with Angular, React, or Web API, powered by Aspire.",
+  "theme": "palm",
+  "primaryColor": "#552dd4",
+  "lightColor": "#856de0",
+  "darkColor": "#af9fea",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "getting-started/installation",
+              "getting-started/quickstart"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/overview",
+              "architecture/domain-layer",
+              "architecture/application-layer",
+              "architecture/infrastructure-layer",
+              "architecture/web-layer"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/adding-a-feature",
+              "guides/validation",
+              "guides/authorization",
+              "guides/error-handling",
+              "guides/testing"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/database",
+              "configuration/frontend",
+              "configuration/aspire"
+            ]
+          },
+          {
+            "group": "Architecture Decision Records",
+            "pages": [
+              "adr/efcore-in-application-layer",
+              "adr/aspire-orchestration",
+              "adr/mediatr-contracts-in-domain"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Endpoints",
+            "pages": [
+              "api/overview",
+              "api/todo-lists",
+              "api/todo-items",
+              "api/weather-forecasts",
+              "api/users"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Clean Architecture layers: Domain, Application, Infrastructure, Web",
+    "CQRS pattern via MediatR with pipeline behaviours (validation, logging, authorization, performance)",
+    "Multiple client framework options: Angular, React, or Web API only",
+    "Multiple database providers: SQLite (default), PostgreSQL, SQL Server via Entity Framework Core",
+    ".NET Aspire for local orchestration, observability, and self-contained testing",
+    "ASP.NET Core Identity with JWT authentication",
+    "FluentValidation for request validation",
+    "Scalar API documentation (OpenAPI)",
+    "Comprehensive test suite: unit, functional, integration, and acceptance tests"
+  ],
+  "publicApiSurface": [
+    "dotnet new ca-sln --client-framework [angular|react|none] --database [postgresql|sqlite|sqlserver]",
+    "GET /api/TodoLists — Get all Todo Lists",
+    "POST /api/TodoLists — Create a new Todo List",
+    "PUT /api/TodoLists/{id} — Update a Todo List",
+    "DELETE /api/TodoLists/{id} — Delete a Todo List",
+    "GET /api/TodoItems — Get Todo Items with pagination",
+    "POST /api/TodoItems — Create a Todo Item",
+    "PUT /api/TodoItems/{id} — Update a Todo Item",
+    "DELETE /api/TodoItems/{id} — Delete a Todo Item",
+    "GET /api/WeatherForecasts — Get weather forecasts",
+    "IApplicationDbContext — Application layer DB abstraction",
+    "IIdentityService — User identity abstraction",
+    "BaseEntity / BaseAuditableEntity / BaseEvent — Domain base classes",
+    "IPipelineBehavior<TRequest, TResponse> — MediatR pipeline extension point"
+  ]
+}

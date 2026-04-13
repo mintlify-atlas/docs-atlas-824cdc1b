@@ -1,97 +1,35 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "Clean Architecture: .NET solution template"
+description: "Generate a Clean Architecture .NET solution in one command. Choose your frontend (Angular, React, or API-only) and database provider, then run with Aspire."
 ---
 
-## Setting up
+The Clean Architecture Solution Template gives you a production-ready starting point for building enterprise .NET applications. It wires together Clean Architecture's layered structure — Domain, Application, Infrastructure, and Web — with CQRS via MediatR, FluentValidation, Entity Framework Core, ASP.NET Core Identity, and .NET Aspire for local orchestration and testing.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/getting-started/installation">
+    Install the template from NuGet and create your first solution
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Quickstart" icon="rocket" href="/getting-started/quickstart">
+    Create a solution, run the app, and explore the Aspire dashboard
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Architecture overview" icon="layer-group" href="/architecture/overview">
+    Understand the four-layer Clean Architecture structure
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Adding a feature" icon="plus" href="/guides/adding-a-feature">
+    Walk through adding a CQRS command and query end-to-end
   </Card>
-</Columns>
+  <Card title="Configuration" icon="gear" href="/configuration/database">
+    Configure your database, frontend, and Aspire orchestration
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/overview">
+    Explore the REST API endpoints included in the template
+  </Card>
+</CardGroup>
 
-## Create beautiful pages
+## Quick install
 
-Everything you need to create world-class documentation.
-
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
-
-## Need inspiration?
-
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+```bash
+dotnet new install Clean.Architecture.Solution.Template
+dotnet new ca-sln --client-framework angular --database sqlite --output MyApp
+dotnet run --project MyApp/src/AppHost
+```

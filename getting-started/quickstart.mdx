@@ -1,0 +1,94 @@
+---
+title: "Get started with Clean Architecture"
+description: "Create a new solution, start the app with .NET Aspire, and explore the Scalar API reference and seeded Todo data in under five minutes."
+---
+
+This guide takes you from a fresh install of the template to a running application. By the end you will have the Aspire dashboard open in your browser, the Scalar API reference loaded, and the seeded Todo list data visible through the API.
+
+<Steps>
+  <Step title="Install the template">
+    If you have not installed the template yet, run:
+
+    ```bash
+    dotnet new install Clean.Architecture.Solution.Template
+    ```
+
+    See the [installation guide](/getting-started/installation) for prerequisites and all available options.
+  </Step>
+
+  <Step title="Create a new solution">
+    Generate a solution with a name of your choice. The example below uses SQLite so no Docker setup is needed:
+
+    ```bash
+    dotnet new ca-sln -cf angular -db sqlite -o MyApp
+    ```
+
+    <Note>
+      SQLite is the default database provider and runs in-process — no Docker container or external database server required. It is the fastest way to get started.
+    </Note>
+
+    Change into the new directory:
+
+    ```bash
+    cd MyApp
+    ```
+  </Step>
+
+  <Step title="Run the application">
+    Start the app through the Aspire AppHost project:
+
+    ```bash
+    dotnet run --project src/AppHost
+    ```
+
+    Aspire builds all projects, starts the database (a container for PostgreSQL or SQL Server, or a local file for SQLite), and launches the ASP.NET Core web API. On the first run the database is seeded with sample data.
+
+    <Tip>
+      The Aspire dashboard URL is printed in the terminal output, for example `http://localhost:15000`. Open that URL in your browser to see all running resources, logs, and distributed traces.
+    </Tip>
+  </Step>
+
+  <Step title="Explore the Aspire dashboard">
+    The Aspire dashboard shows every resource Aspire is managing:
+
+    - **webapi** — the ASP.NET Core backend, with a direct link labelled **Scalar API Reference**
+    - **webfrontend** — the Angular or React SPA (only present when you chose a client framework)
+    - **Logs** — structured log output from each resource
+    - **Traces** — distributed traces across services
+
+    Click the **Scalar API Reference** link next to the `webapi` resource to open the interactive API docs.
+  </Step>
+
+  <Step title="Try the Scalar API reference">
+    Scalar is the OpenAPI UI included in the template. It is served at `/scalar` on the web API.
+
+    From the Scalar UI you can:
+
+    - Browse all available endpoints grouped by resource
+    - Send requests directly from the browser
+    - Inspect request and response schemas
+
+    The template seeds a **Todo** list with several items on first run in the `Development` environment. Try the `GET /api/TodoLists` endpoint to see the seeded data.
+  </Step>
+</Steps>
+
+## Seeded data
+
+When running in the `Development` environment, `InitialiseDatabaseAsync` is called during startup (see `src/Web/Program.cs`). This seeds the database with a sample Todo list and a set of Todo items so the API returns meaningful data from the first request.
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Architecture overview" icon="layer-group" href="/architecture/overview">
+    Understand the Domain, Application, Infrastructure, and Web layers
+  </Card>
+  <Card title="Adding a feature" icon="plus" href="/guides/adding-a-feature">
+    Walk through adding a CQRS command and query end-to-end
+  </Card>
+  <Card title="Database configuration" icon="database" href="/configuration/database">
+    Switch between SQLite, PostgreSQL, and SQL Server
+  </Card>
+  <Card title="Frontend configuration" icon="display" href="/configuration/frontend">
+    Configure Angular, React, or API-only mode
+  </Card>
+</CardGroup>

@@ -1,0 +1,77 @@
+---
+title: "Clean Architecture Solution Template"
+description: "A .NET solution template for enterprise ASP.NET Core apps using Clean Architecture with Angular, React, or Web API, powered by Aspire and Entity Framework Core."
+---
+
+The Clean Architecture Solution Template gives you a production-ready starting point for building enterprise .NET applications. It wires together Clean Architecture's layered structure — Domain, Application, Infrastructure, and Web — with CQRS via MediatR, FluentValidation, Entity Framework Core, ASP.NET Core Identity, and .NET Aspire for local orchestration and testing.
+
+Generate a new solution in one command, choosing your client framework (Angular, React, or API-only) and database provider (SQLite, PostgreSQL, or SQL Server). Everything is pre-wired and ready to run.
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/getting-started/installation">
+    Install the template from NuGet and create your first solution
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/getting-started/quickstart">
+    Create a solution, run the app, and explore the Aspire dashboard
+  </Card>
+  <Card title="Architecture overview" icon="layer-group" href="/architecture/overview">
+    Understand the four-layer Clean Architecture structure
+  </Card>
+  <Card title="Adding a feature" icon="plus" href="/guides/adding-a-feature">
+    Walk through adding a CQRS command and query end-to-end
+  </Card>
+  <Card title="Configuration" icon="gear" href="/configuration/database">
+    Configure your database, frontend, and Aspire orchestration
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/overview">
+    Explore the REST API endpoints included in the template
+  </Card>
+</CardGroup>
+
+## What's included
+
+The template generates a complete solution with the following structure:
+
+| Project | Purpose |
+|---|---|
+| `Domain` | Entities, value objects, domain events, enums |
+| `Application` | CQRS handlers, validators, pipeline behaviours |
+| `Infrastructure` | EF Core DbContext, Identity, database migrations |
+| `Web` | ASP.NET Core minimal API endpoints, SPA host |
+| `AppHost` | .NET Aspire orchestration for local development |
+| `ServiceDefaults` | OpenTelemetry, health checks, service discovery |
+
+## Technologies
+
+<CardGroup cols={3}>
+  <Card title="ASP.NET Core 10" icon="server" href="https://docs.microsoft.com/aspnet/core">
+    Web API and SPA hosting
+  </Card>
+  <Card title=".NET Aspire" icon="cloud" href="https://aspire.dev">
+    Orchestration and observability
+  </Card>
+  <Card title="Entity Framework Core 10" icon="database" href="https://docs.microsoft.com/ef/core">
+    Data access with multiple providers
+  </Card>
+  <Card title="MediatR" icon="arrows-split-up-and-left" href="https://github.com/jbogard/MediatR">
+    CQRS and domain event dispatch
+  </Card>
+  <Card title="FluentValidation" icon="check-double" href="https://fluentvalidation.net">
+    Request validation pipeline
+  </Card>
+  <Card title="Angular or React" icon="display" href="/configuration/frontend">
+    Optional SPA client frameworks
+  </Card>
+</CardGroup>
+
+## Quick install
+
+```bash
+dotnet new install Clean.Architecture.Solution.Template
+dotnet new ca-sln --client-framework angular --database sqlite --output MyApp
+dotnet run --project MyApp/src/AppHost
+```
+
+<Tip>
+  Run `dotnet new ca-sln --help` to see all available template options including client framework and database provider choices.
+</Tip>

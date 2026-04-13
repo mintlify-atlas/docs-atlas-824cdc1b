@@ -1,0 +1,183 @@
+---
+title: "Request validation with FluentValidation"
+description: "Learn how FluentValidation validators are wired into the MediatR pipeline so every command and query is validated automatically before its handler runs."
+---
+
+Validation in this template is **automatic and zero-boilerplate at the handler level**. When a command or query enters the MediatR pipeline, the `ValidationBehaviour` finds every `IValidator<TRequest>` registered in the DI container and runs them all before passing the request to the handler. If any rule fails, a `ValidationException` is thrown immediately and the handler never executes. The ASP.NET Core exception handler then converts that exception into an RFC 9110-compliant `400 Bad Request` response with a `ValidationProblemDetails` body.
+
+## How the pipeline behaviour works
+
+The `ValidationBehaviour` is a generic MediatR pipeline behaviour that sits between the logging behaviour and the handler:
+
+```csharp
+// src/Application/Common/Behaviours/ValidationBehaviour.cs
+public class ValidationBehaviour<TRequest, TResponse> : IPipelineBehavior<TRequest, TResponse>
+    where TRequest : notnull
+{
+    private readonly IEnumerable<IValidator<TRequest>> _validators;
+
+    public ValidationBehaviour(IEnumerable<IValidator<TRequest>> validators)
+    {
+        _validators = validators;
+    }
+
+    public async Task<TResponse> Handle(
+        TRequest request,
+        RequestHandlerDelegate<TResponse> next,
+        CancellationToken cancellationToken)
+    {
+        if (_validators.Any())
+        {
+            var validationResults = await Task.WhenAll(
+                _validators.Select(v =>
+                    v.ValidateAsync(new ValidationContext<TRequest>(request), cancellationToken)));
+
+            var failures = validationResults
+                .Where(r => r.Errors.Any())
+                .SelectMany(r => r.Errors)
+                .ToList();
+
+            if (failures.Count != 0)
+                throw new ValidationException(failures);
+        }
+
+        return await next();
+    }
+}
+```
+
+All registered validators for the request type run **concurrently** via `Task.WhenAll`. Failures from every validator are aggregated before the exception is thrown, so the caller receives all errors in a single response rather than one at a time.
+
+## Writing a validator
+
+Create a class that extends `AbstractValidator<TCommand>` and place it in the same folder as the command or query it validates. The DI registration in `DependencyInjection.cs` scans the Application assembly and registers every `IValidator<>` implementation automatically — you do not need to register validators manually.
+
+<CodeGroup>
+
+```csharp CreateTodoListCommandValidator.cs
+// src/Application/TodoLists/Commands/CreateTodoList/CreateTodoListCommandValidator.cs
+using CleanArchitecture.Application.Common.Interfaces;
+
+namespace CleanArchitecture.Application.TodoLists.Commands.CreateTodoList;
+
+public class CreateTodoListCommandValidator : AbstractValidator<CreateTodoListCommand>
+{
+    private readonly IApplicationDbContext _context;
+
+    public CreateTodoListCommandValidator(IApplicationDbContext context)
+    {
+        _context = context;
+
+        RuleFor(v => v.Title)
+            .NotEmpty()
+            .MaximumLength(200)
+            .MustAsync(BeUniqueTitle)
+                .WithMessage("'{PropertyName}' must be unique.")
+                .WithErrorCode("Unique");
+    }
+
+    public async Task<bool> BeUniqueTitle(string title, CancellationToken cancellationToken)
+    {
+        return !await _context.TodoLists
+            .AnyAsync(l => l.Title == title, cancellationToken);
+    }
+}
+```
+
+```csharp CreateTodoItemCommandValidator.cs
+// src/Application/TodoItems/Commands/CreateTodoItem/CreateTodoItemCommandValidator.cs
+namespace CleanArchitecture.Application.TodoItems.Commands.CreateTodoItem;
+
+public class CreateTodoItemCommandValidator : AbstractValidator<CreateTodoItemCommand>
+{
+    public CreateTodoItemCommandValidator()
+    {
+        RuleFor(v => v.Title)
+            .MaximumLength(200)
+            .NotEmpty();
+    }
+}
+```
+
+</CodeGroup>
+
+Both examples show the same pattern — inherit `AbstractValidator<T>`, define rules in the constructor. Validators that need database access can receive `IApplicationDbContext` (or any other registered service) through constructor injection just like any other class.
+
+## What happens when validation fails
+
+When at least one rule fails, `ValidationBehaviour` throws `Application.Common.Exceptions.ValidationException`. The exception carries a dictionary of property names to error message arrays:
+
+```csharp
+// src/Application/Common/Exceptions/ValidationException.cs
+public class ValidationException : Exception
+{
+    public ValidationException()
+        : base("One or more validation failures have occurred.")
+    {
+        Errors = new Dictionary<string, string[]>();
+    }
+
+    public ValidationException(IEnumerable<ValidationFailure> failures)
+        : this()
+    {
+        Errors = failures
+            .GroupBy(e => e.PropertyName, e => e.ErrorMessage)
+            .ToDictionary(
+                failureGroup => failureGroup.Key,
+                failureGroup => failureGroup.ToArray());
+    }
+
+    public IDictionary<string, string[]> Errors { get; }
+}
+```
+
+`ProblemDetailsExceptionHandler` in the Web layer catches this exception and writes an HTTP 400 response:
+
+```json
+{
+  "type": "https://tools.ietf.org/html/rfc9110#section-15.5.1",
+  "status": 400,
+  "errors": {
+    "Title": [
+      "'Title' must not be empty.",
+      "'Title' must be unique."
+    ]
+  }
+}
+```
+
+The `errors` field maps directly to the `Errors` dictionary on `ValidationException`, making it straightforward for API clients to display field-level error messages.
+
+## Auto-registration of validators
+
+Validators are registered in `src/Application/DependencyInjection.cs` using FluentValidation's assembly scanning:
+
+```csharp
+services.AddValidatorsFromAssembly(Assembly.GetExecutingAssembly());
+```
+
+Any class that inherits `AbstractValidator<T>` in the Application assembly is picked up automatically. No manual registration is required.
+
+<Tip>
+  Keep validators **focused on input constraints** (field lengths, required fields, format rules, uniqueness checks). Do not put business invariants that belong on the domain entity inside a validator. For example, a rule that a `TodoList` must have at most 100 items is a domain rule — it should live on the entity or be enforced in the handler. The validator's job is to reject malformed or obviously invalid requests before they reach the domain.
+</Tip>
+
+<Tip>
+  For update commands that need a uniqueness check, pass the full command object to `MustAsync` so you can exclude the current record from the duplicate check, as shown in `UpdateTodoListCommandValidator`:
+
+  ```csharp
+  RuleFor(v => v.Title)
+      .MustAsync(BeUniqueTitle)
+          .WithMessage("'{PropertyName}' must be unique.");
+
+  public async Task<bool> BeUniqueTitle(
+      UpdateTodoListCommand model,
+      string title,
+      CancellationToken cancellationToken)
+  {
+      return !await _context.TodoLists
+          .Where(l => l.Id != model.Id)
+          .AnyAsync(l => l.Title == title, cancellationToken);
+  }
+  ```
+</Tip>

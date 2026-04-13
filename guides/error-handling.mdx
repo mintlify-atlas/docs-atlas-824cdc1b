@@ -1,0 +1,196 @@
+---
+title: "Error handling and problem details responses"
+description: "Understand how exceptions flow from the MediatR pipeline through ASP.NET Core and are converted into RFC 9110 ProblemDetails responses."
+---
+
+Error handling in this template operates at two distinct layers. The first is the **MediatR pipeline**, where the `UnhandledExceptionBehaviour` logs any exception that escapes a handler before re-throwing it. The second is the **ASP.NET Core exception handler**, where `ProblemDetailsExceptionHandler` intercepts well-known application exceptions and converts them into RFC 9110-compliant `ProblemDetails` JSON responses. Unknown exceptions fall through to ASP.NET Core's default middleware, which returns a generic 500.
+
+## Layer 1: UnhandledExceptionBehaviour
+
+Every request that passes through MediatR is wrapped by the `UnhandledExceptionBehaviour`. Its sole job is structured logging — it records the request name and serialized request body so that diagnosing failures in production is straightforward.
+
+```csharp
+// src/Application/Common/Behaviours/UnhandledExceptionBehaviour.cs
+public class UnhandledExceptionBehaviour<TRequest, TResponse> : IPipelineBehavior<TRequest, TResponse>
+    where TRequest : notnull
+{
+    private readonly ILogger<TRequest> _logger;
+
+    public UnhandledExceptionBehaviour(ILogger<TRequest> logger)
+    {
+        _logger = logger;
+    }
+
+    public async Task<TResponse> Handle(
+        TRequest request,
+        RequestHandlerDelegate<TResponse> next,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await next();
+        }
+        catch (Exception ex)
+        {
+            var requestName = typeof(TRequest).Name;
+
+            _logger.LogError(ex,
+                "CleanArchitecture Request: Unhandled Exception for Request {Name} {@Request}",
+                requestName, request);
+
+            throw;
+        }
+    }
+}
+```
+
+The exception is always re-thrown. The behaviour only adds observability; it does not swallow exceptions or change the response.
+
+## Layer 2: ProblemDetailsExceptionHandler
+
+`ProblemDetailsExceptionHandler` implements `IExceptionHandler` and is registered with `app.UseExceptionHandler()`. It pattern-matches on the exception type and maps each known exception to an appropriate HTTP status code and `ProblemDetails` body:
+
+```csharp
+// src/Web/Infrastructure/ProblemDetailsExceptionHandler.cs
+public class ProblemDetailsExceptionHandler : IExceptionHandler
+{
+    public async ValueTask<bool> TryHandleAsync(
+        HttpContext httpContext,
+        Exception exception,
+        CancellationToken cancellationToken)
+    {
+        var (statusCode, problemDetails) = exception switch
+        {
+            ValidationException ve => (StatusCodes.Status400BadRequest,
+                (ProblemDetails)new ValidationProblemDetails(ve.Errors)
+                {
+                    Status = StatusCodes.Status400BadRequest,
+                    Type = "https://tools.ietf.org/html/rfc9110#section-15.5.1"
+                }),
+            NotFoundException ne => (StatusCodes.Status404NotFound, new ProblemDetails
+                {
+                    Status = StatusCodes.Status404NotFound,
+                    Type = "https://tools.ietf.org/html/rfc9110#section-15.5.5",
+                    Title = "The specified resource was not found.",
+                    Detail = ne.Message
+                }),
+            UnauthorizedAccessException => (StatusCodes.Status401Unauthorized, new ProblemDetails
+                {
+                    Status = StatusCodes.Status401Unauthorized,
+                    Title = "Unauthorized",
+                    Type = "https://tools.ietf.org/html/rfc9110#section-15.5.2"
+                }),
+            ForbiddenAccessException => (StatusCodes.Status403Forbidden, new ProblemDetails
+                {
+                    Status = StatusCodes.Status403Forbidden,
+                    Title = "Forbidden",
+                    Type = "https://tools.ietf.org/html/rfc9110#section-15.5.4"
+                }),
+            _ => (-1, null)
+        };
+
+        if (problemDetails is null) return false;
+
+        httpContext.Response.StatusCode = statusCode;
+        await httpContext.Response.WriteAsJsonAsync(problemDetails, cancellationToken);
+        return true;
+    }
+}
+```
+
+When the handler returns `false` (the `_ => (-1, null)` catch-all), ASP.NET Core's built-in problem details middleware writes a generic 500 response.
+
+## Exception types and their HTTP mappings
+
+| Exception | HTTP status | When thrown |
+|-----------|-------------|-------------|
+| `ValidationException` | 400 Bad Request | One or more FluentValidation rules fail in `ValidationBehaviour` |
+| `NotFoundException` | 404 Not Found | `Guard.Against.NotFound` in a command handler finds no matching entity |
+| `UnauthorizedAccessException` | 401 Unauthorized | `AuthorizationBehaviour` detects an unauthenticated user on a protected request |
+| `ForbiddenAccessException` | 403 Forbidden | `AuthorizationBehaviour` finds the user lacks the required role or policy |
+| Any other exception | 500 Internal Server Error | Falls through to ASP.NET Core default middleware |
+
+### ValidationException
+
+Thrown automatically by `ValidationBehaviour` when FluentValidation rules fail. It carries a dictionary of property names to arrays of error messages:
+
+```csharp
+// src/Application/Common/Exceptions/ValidationException.cs
+public class ValidationException : Exception
+{
+    public ValidationException()
+        : base("One or more validation failures have occurred.")
+    {
+        Errors = new Dictionary<string, string[]>();
+    }
+
+    public ValidationException(IEnumerable<ValidationFailure> failures)
+        : this()
+    {
+        Errors = failures
+            .GroupBy(e => e.PropertyName, e => e.ErrorMessage)
+            .ToDictionary(
+                failureGroup => failureGroup.Key,
+                failureGroup => failureGroup.ToArray());
+    }
+
+    public IDictionary<string, string[]> Errors { get; }
+}
+```
+
+The response body is a `ValidationProblemDetails` object, which extends `ProblemDetails` with an `errors` dictionary:
+
+```json
+{
+  "type": "https://tools.ietf.org/html/rfc9110#section-15.5.1",
+  "status": 400,
+  "errors": {
+    "Title": ["'Title' must not be empty.", "'Title' must be unique."]
+  }
+}
+```
+
+### NotFoundException
+
+Thrown via Ardalis `Guard.Against.NotFound` inside command handlers when a requested entity does not exist:
+
+```csharp
+var entity = await _context.TodoLists
+    .Where(l => l.Id == request.Id)
+    .SingleOrDefaultAsync(cancellationToken);
+
+Guard.Against.NotFound(request.Id, entity);
+```
+
+`Guard.Against.NotFound` throws `Ardalis.GuardClauses.NotFoundException` when `entity` is `null`. `ProblemDetailsExceptionHandler` catches it and returns a 404 with the entity ID included in the `Detail` field:
+
+```json
+{
+  "type": "https://tools.ietf.org/html/rfc9110#section-15.5.5",
+  "title": "The specified resource was not found.",
+  "status": 404,
+  "detail": "TodoList (99) was not found."
+}
+```
+
+### ForbiddenAccessException
+
+A minimal custom exception thrown by `AuthorizationBehaviour` when role or policy checks fail:
+
+```csharp
+// src/Application/Common/Exceptions/ForbiddenAccessException.cs
+public class ForbiddenAccessException : Exception
+{
+    public ForbiddenAccessException() : base() { }
+}
+```
+
+## Adding a new custom exception
+
+To add a new exception type with its own HTTP mapping:
+
+1. Create the exception class in `src/Application/Common/Exceptions/`.
+2. Throw it from any handler or behaviour.
+3. Add a new arm to the `switch` expression in `ProblemDetailsExceptionHandler.TryHandleAsync`.
+
+No other changes are needed. The exception will be caught at the Web layer, converted to the appropriate `ProblemDetails` response, and logged by `UnhandledExceptionBehaviour` before it propagates.

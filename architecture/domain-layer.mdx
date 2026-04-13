@@ -1,0 +1,268 @@
+---
+title: "Domain layer: entities, events, and value objects"
+description: "How the Domain project defines entities, value objects, domain events, and enums with zero external dependencies—forming the stable core of the application."
+keywords: ["domain layer", "entities", "value objects", "domain events", "clean architecture", "ddd"]
+---
+
+The Domain project is the innermost layer of the architecture. It contains the enterprise business rules: entities, value objects, domain events, enums, and exceptions. Because it has no references to any other project—not even Application—it is the most stable and independently testable part of the codebase. Every other layer depends on Domain; Domain depends on nothing.
+
+## Base classes
+
+All entities derive from one of two abstract base classes. `BaseEntity` provides the integer primary key and the domain-event collection. `BaseAuditableEntity` extends it with four audit fields that are populated automatically by an EF Core interceptor.
+
+<CodeGroup>
+
+```csharp BaseEntity.cs
+public abstract class BaseEntity
+{
+    public int Id { get; set; }
+
+    private readonly List<BaseEvent> _domainEvents = new();
+
+    [NotMapped]
+    public IReadOnlyCollection<BaseEvent> DomainEvents => _domainEvents.AsReadOnly();
+
+    public void AddDomainEvent(BaseEvent domainEvent)
+    {
+        _domainEvents.Add(domainEvent);
+    }
+
+    public void RemoveDomainEvent(BaseEvent domainEvent)
+    {
+        _domainEvents.Remove(domainEvent);
+    }
+
+    public void ClearDomainEvents()
+    {
+        _domainEvents.Clear();
+    }
+}
+```
+
+```csharp BaseAuditableEntity.cs
+public abstract class BaseAuditableEntity : BaseEntity
+{
+    public DateTimeOffset Created { get; set; }
+
+    public string? CreatedBy { get; set; }
+
+    public DateTimeOffset LastModified { get; set; }
+
+    public string? LastModifiedBy { get; set; }
+}
+```
+
+</CodeGroup>
+
+The `[NotMapped]` attribute on `DomainEvents` prevents EF Core from trying to persist the collection. Audit fields on `BaseAuditableEntity` are written by `AuditableEntityInterceptor` in the Infrastructure layer—the Domain class itself remains ignorant of how or when those values are set.
+
+## Domain events
+
+`BaseEvent` is the root type for all domain events. It implements MediatR's `INotification`, which means any event raised on an entity can be published through the MediatR mediator after `SaveChangesAsync` is called.
+
+```csharp BaseEvent.cs
+using MediatR;
+
+public abstract class BaseEvent : INotification
+{
+}
+```
+
+<Note>
+Although `BaseEvent` references MediatR's `INotification`, MediatR is a pure .NET library with no infrastructure dependencies, so this does not violate the rule that Domain has no external dependencies on frameworks.
+</Note>
+
+The only concrete event in the template is `TodoItemCompletedEvent`, raised inside the `TodoItem.Done` setter whenever a task is marked complete for the first time:
+
+```csharp TodoItemCompletedEvent.cs
+public class TodoItemCompletedEvent : BaseEvent
+{
+    public TodoItemCompletedEvent(TodoItem item)
+    {
+        Item = item;
+    }
+
+    public TodoItem Item { get; }
+}
+```
+
+This pattern lets the domain raise facts ("this thing happened") while Infrastructure decides how to react (log it, send an email, update a read-model).
+
+## Entities
+
+The template ships with two entities that demonstrate the full pattern.
+
+<CodeGroup>
+
+```csharp TodoList.cs
+public class TodoList : BaseAuditableEntity
+{
+    public string? Title { get; set; }
+
+    public Colour Colour { get; set; } = Colour.Grey;
+
+    public IList<TodoItem> Items { get; private set; } = new List<TodoItem>();
+}
+```
+
+```csharp TodoItem.cs
+public class TodoItem : BaseAuditableEntity
+{
+    public int ListId { get; set; }
+
+    public string? Title { get; set; }
+
+    public string? Note { get; set; }
+
+    public PriorityLevel Priority { get; set; }
+
+    private bool _done;
+    public bool Done
+    {
+        get => _done;
+        set
+        {
+            if (value && !_done)
+            {
+                AddDomainEvent(new TodoItemCompletedEvent(this));
+            }
+
+            _done = value;
+        }
+    }
+
+    public TodoList List { get; set; } = null!;
+}
+```
+
+</CodeGroup>
+
+Key observations:
+
+- `TodoList.Items` uses a private setter (`private set`) to ensure items can only be added through the aggregate root's own methods in a real DDD model.
+- `TodoItem.Done` encapsulates a business rule: setting `Done = true` for the first time raises a domain event. The persistence layer never needs to implement this logic itself.
+- Both entities inherit audit fields from `BaseAuditableEntity`.
+
+## Value objects
+
+Value objects represent concepts that are defined entirely by their attributes rather than by identity. The template implements `ValueObject` as an abstract base with equality comparison driven by `GetEqualityComponents()`.
+
+```csharp ValueObject.cs
+public abstract class ValueObject
+{
+    protected abstract IEnumerable<object> GetEqualityComponents();
+
+    public override bool Equals(object? obj)
+    {
+        if (obj == null || obj.GetType() != GetType())
+        {
+            return false;
+        }
+
+        var other = (ValueObject)obj;
+        return GetEqualityComponents().SequenceEqual(other.GetEqualityComponents());
+    }
+
+    public override int GetHashCode()
+    {
+        var hash = new HashCode();
+        foreach (var component in GetEqualityComponents())
+        {
+            hash.Add(component);
+        }
+        return hash.ToHashCode();
+    }
+
+    public static bool operator ==(ValueObject left, ValueObject right)
+        => EqualOperator(left, right);
+
+    public static bool operator !=(ValueObject left, ValueObject right)
+        => NotEqualOperator(left, right);
+}
+```
+
+`Colour` is the concrete value object. It wraps a hex code string, enforces a set of allowed values, and provides named factory properties:
+
+```csharp Colour.cs
+public class Colour(string code) : ValueObject
+{
+    public static Colour From(string code)
+    {
+        var colour = new Colour(code);
+        if (!SupportedColours.Contains(colour))
+            throw new UnsupportedColourException(code);
+        return colour;
+    }
+
+    public static Colour Red    => new("#E05C4D");
+    public static Colour Orange => new("#D98B2B");
+    public static Colour Green  => new("#4CAF50");
+    public static Colour Teal   => new("#26A69A");
+    public static Colour Blue   => new("#5C6BC0");
+    public static Colour Purple => new("#AB47BC");
+    public static Colour Grey   => new("#78909C");
+
+    public string Code { get; private set; } =
+        string.IsNullOrWhiteSpace(code) ? "#000000" : code;
+
+    public static implicit operator string(Colour colour) => colour.ToString();
+    public static explicit operator Colour(string code)   => From(code);
+
+    public override string ToString() => Code;
+
+    public static IEnumerable<Colour> SupportedColours
+    {
+        get
+        {
+            yield return Red; yield return Orange; yield return Green;
+            yield return Teal; yield return Blue; yield return Purple;
+            yield return Grey;
+        }
+    }
+
+    protected override IEnumerable<object> GetEqualityComponents()
+    {
+        yield return Code;
+    }
+}
+```
+
+Because `Colour` derives from `ValueObject`, two instances with the same `Code` are considered equal by value, not by reference. EF Core maps this as an owned entity inside `TodoListConfiguration` using `OwnsOne`.
+
+## Enums
+
+Enums represent a fixed set of named constants. `PriorityLevel` is used by `TodoItem`:
+
+```csharp PriorityLevel.cs
+public enum PriorityLevel
+{
+    None   = 0,
+    Low    = 1,
+    Medium = 2,
+    High   = 3
+}
+```
+
+The `GetTodosQuery` handler in Application uses `Enum.GetValues` to project all priority levels into `LookupDto` objects for the client, so the UI always shows an up-to-date list without hard-coding values.
+
+## Directory structure
+
+```
+Domain/
+├── Common/
+│   ├── BaseEntity.cs
+│   ├── BaseAuditableEntity.cs
+│   ├── BaseEvent.cs
+│   └── ValueObject.cs
+├── Constants/
+├── Entities/
+│   ├── TodoList.cs
+│   └── TodoItem.cs
+├── Enums/
+│   └── PriorityLevel.cs
+├── Events/
+│   └── TodoItemCompletedEvent.cs
+├── Exceptions/
+└── ValueObjects/
+    └── Colour.cs
+```

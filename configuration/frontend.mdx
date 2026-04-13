@@ -1,0 +1,134 @@
+---
+title: "Choose a frontend: Angular, React, or API-only"
+description: "Pick Angular, React, or API-only via --client-framework. The template wires up the SPA dev server, NSwag client generation, and Aspire for the chosen variant."
+---
+
+The template ships three frontend variants: **Angular**, **React**, and **API-only**. The choice is made at generation time using the `--client-framework` flag. Angular is the default. Like the database choice, this is a one-time decision baked into the generated project structure — you cannot switch variants after generation.
+
+## Choosing a frontend
+
+<Tabs>
+  <Tab title="Angular">
+    The Angular variant is the default. It generates a full Angular 21 application in `src/Web/ClientApp/` alongside the ASP.NET Core backend.
+
+    ```bash
+    dotnet new ca-sln --name MyApp
+    # or explicitly:
+    dotnet new ca-sln --name MyApp --client-framework Angular
+    ```
+
+    **What is included:**
+    - `src/Web/ClientApp/` — Angular project with PicoCSS, Lucide icons, and NSwag-generated TypeScript API client
+    - Cookie-based authentication (ASP.NET Core Identity with `AddIdentityCookies`)
+    - Playwright-based acceptance tests in `tests/Web.AcceptanceTests/`
+    - Aspire orchestrates the backend and the Angular dev server as a `JavaScriptApp` resource
+
+    The Angular dev server is started by Aspire when running the AppHost:
+
+    ```csharp
+    builder.AddJavaScriptApp(Services.WebFrontend, "./../Web/ClientApp")
+        .WithRunScript("start")
+        .WithReference(web)
+        .WaitFor(web)
+        .WithHttpEndpoint(env: "PORT");
+    ```
+
+    NSwag regenerates the TypeScript client before each `npm start` or `npm run build` via the `prestart` / `prebuild` hooks in `package.json`.
+
+    <Note>
+      Node.js must be installed to run the Angular dev server. The Aspire dashboard still launches without it, but the frontend resource will fail to start.
+    </Note>
+  </Tab>
+
+  <Tab title="React">
+    The React variant generates a Vite + React 19 application. The template renames `src/Web/ClientApp-React/` to `src/Web/ClientApp/` during generation so all tooling paths remain consistent between variants.
+
+    ```bash
+    dotnet new ca-sln --name MyApp --client-framework React
+    ```
+
+    **What is included:**
+    - `src/Web/ClientApp/` (renamed from `ClientApp-React`) — Vite + React project with React Router, PicoCSS, Lucide React, and NSwag-generated TypeScript client
+    - Cookie-based authentication (same as Angular)
+    - Playwright-based acceptance tests in `tests/Web.AcceptanceTests/`
+    - Aspire orchestrates the backend and the Vite dev server
+
+    Key dependencies in the generated `package.json`:
+
+    ```json
+    {
+      "dependencies": {
+        "react": "^19.1.0",
+        "react-dom": "^19.1.0",
+        "react-router-dom": "^7.6.1",
+        "@picocss/pico": "^2.0.6"
+      },
+      "devDependencies": {
+        "vite": "^8.0.0",
+        "@vitejs/plugin-react": "^6.0.0"
+      }
+    }
+    ```
+
+    NSwag regenerates the TypeScript client before each `npm start` or `npm run build` via `prestart` / `prebuild` hooks.
+
+    <Note>
+      Node.js must be installed to run the Vite dev server. The backend and Aspire dashboard work without it, but the frontend Aspire resource will not start.
+    </Note>
+  </Tab>
+
+  <Tab title="API only">
+    The API-only variant removes all SPA scaffolding. There is no `ClientApp/` directory, no Playwright acceptance tests, and no Node.js requirement. The application root serves the Scalar API reference instead of a frontend.
+
+    ```bash
+    dotnet new ca-sln --name MyApp --client-framework None
+    ```
+
+    **What is included:**
+    - Scalar API reference at `/scalar`
+    - Bearer token authentication (`AddBearerToken` + `AddApiEndpoints`) instead of cookies
+    - `BearerSecuritySchemeTransformer.cs` wired into OpenAPI to document bearer auth
+    - Aspire AppHost runs only the backend — no JavaScript resource
+    - `Web.http` generated for HTTP file-based API testing
+
+    **What is excluded:**
+    - `src/Web/ClientApp/` — no SPA project
+    - `src/Web/Pages/` — no Razor pages
+    - `tests/Web.AcceptanceTests/` — no Playwright tests
+
+    The Aspire dashboard links directly to the Scalar reference:
+
+    ```csharp
+    var web = builder.AddProject<Projects.Web>(Services.WebApi)
+        .WithUrlForEndpoint("http", url =>
+        {
+            url.DisplayText = "Scalar API Reference";
+            url.Url = "/scalar";
+        });
+    ```
+
+    <Note>
+      The API-only variant is the right choice when the frontend is in a separate repository, when you are building a microservice, or when you want to integrate a framework not provided by the template.
+    </Note>
+  </Tab>
+</Tabs>
+
+## How the template selects a variant
+
+The template uses three computed symbols in `.template.config/template.json` to gate which files are included or excluded during generation:
+
+```json
+{
+  "UseAngular": { "type": "computed", "value": "(ClientFramework == \"Angular\")" },
+  "UseReact":   { "type": "computed", "value": "(ClientFramework == \"React\")" },
+  "UseApiOnly": { "type": "computed", "value": "(ClientFramework == \"None\")" }
+}
+```
+
+These symbols control file exclusions and renames. For example, the React variant excludes `src/Web/ClientApp/**` (the Angular directory) and renames `ClientApp-React` to `ClientApp`. The API-only variant excludes both client app directories, the `Pages/` folder, and the acceptance tests.
+
+## NSwag API client generation
+
+Both Angular and React variants use [NSwag](https://github.com/RicoSuter/NSwag) to generate strongly-typed TypeScript API clients from the backend's OpenAPI specification. The `nswag.json` configuration in `ClientApp/` points at the running backend and regenerates `src/app/web-api-client.ts` (Angular) or the equivalent React file before every build and dev server start.
+
+This means your frontend TypeScript types always stay in sync with the ASP.NET Core API — adding a new command or query property is immediately reflected in the generated client.

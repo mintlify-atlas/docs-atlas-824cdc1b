@@ -1,0 +1,73 @@
+---
+title: "Clean Architecture: four-layer structure explained"
+description: "Understand how the four layers—Domain, Application, Infrastructure, and Web—are structured and why all dependencies point inward toward the domain."
+keywords: ["clean architecture", "cqrs", "mediatr", "dependency rule", "layers"]
+---
+
+Clean Architecture organises code into concentric layers where every dependency arrow points inward. The outermost layers (Web, Infrastructure) know about the inner layers, but the inner layers (Domain, Application) know nothing about the outer ones. This strict rule means you can swap a database, change a UI framework, or add a new delivery mechanism without touching the business logic.
+
+<Note>
+The fundamental rule: source-code dependencies must point inward. Domain has no dependencies on any other project. Application depends only on Domain. Infrastructure and Web both depend on Application (and transitively on Domain), but never on each other.
+</Note>
+
+## Layer overview
+
+```
+┌─────────────────────────────────────────────┐
+│                   Web                        │  ← Entry point, minimal API, SPA hosting
+│  ┌───────────────────────────────────────┐  │
+│  │            Infrastructure             │  │  ← EF Core, Identity, external services
+│  │  ┌─────────────────────────────────┐ │  │
+│  │  │          Application            │ │  │  ← CQRS handlers, pipeline behaviours
+│  │  │  ┌───────────────────────────┐ │ │  │
+│  │  │  │         Domain            │ │ │  │  ← Entities, value objects, events
+│  │  │  └───────────────────────────┘ │ │  │
+│  │  └─────────────────────────────────┘ │  │
+│  └───────────────────────────────────────┘  │
+└─────────────────────────────────────────────┘
+```
+
+## Layers at a glance
+
+| Layer | Project | Responsibilities | Allowed dependencies |
+|---|---|---|---|
+| **Domain** | `CleanArchitecture.Domain` | Entities, value objects, domain events, enums, exceptions | None (no project references) |
+| **Application** | `CleanArchitecture.Application` | CQRS commands & queries, MediatR handlers, pipeline behaviours, interfaces | Domain only |
+| **Infrastructure** | `CleanArchitecture.Infrastructure` | EF Core `ApplicationDbContext`, Identity, interceptors, data seeding | Application (and transitively Domain) |
+| **Web** | `CleanArchitecture.Web` | Minimal API endpoints, SPA hosting, OpenAPI/Scalar, exception handling | Application + Infrastructure |
+
+## CQRS and MediatR
+
+The Application layer implements CQRS (Command Query Responsibility Segregation) using MediatR. Every user action is expressed as either a **command** (write operation that changes state) or a **query** (read operation that returns data). Both are plain C# record types that implement `IRequest<TResponse>`.
+
+Before a request reaches its handler, MediatR routes it through a configurable pipeline of behaviours registered in `Application/DependencyInjection.cs`:
+
+```csharp
+builder.Services.AddMediatR(cfg => {
+    cfg.RegisterServicesFromAssembly(Assembly.GetExecutingAssembly());
+    cfg.AddOpenRequestPreProcessor(typeof(LoggingBehaviour<>));
+    cfg.AddOpenBehavior(typeof(UnhandledExceptionBehaviour<,>));
+    cfg.AddOpenBehavior(typeof(AuthorizationBehaviour<,>));
+    cfg.AddOpenBehavior(typeof(ValidationBehaviour<,>));
+    cfg.AddOpenBehavior(typeof(PerformanceBehaviour<,>));
+});
+```
+
+The pipeline executes in registration order: logging fires first (as a pre-processor), then unhandled exception wrapping, then authorization, then FluentValidation, then performance monitoring, and finally the actual handler.
+
+## Explore each layer
+
+<CardGroup cols={2}>
+  <Card title="Domain layer" icon="database" href="/architecture/domain-layer">
+    Entities, value objects, domain events, enums, and the base classes that underpin every aggregate.
+  </Card>
+  <Card title="Application layer" icon="code" href="/architecture/application-layer">
+    CQRS commands and queries, MediatR pipeline behaviours, and the interfaces that decouple Application from Infrastructure.
+  </Card>
+  <Card title="Infrastructure layer" icon="server" href="/architecture/infrastructure-layer">
+    EF Core data access, ASP.NET Core Identity, auditing interceptors, and database seeding.
+  </Card>
+  <Card title="Web layer" icon="globe" href="/architecture/web-layer">
+    Minimal API endpoints, ISender dispatch, OpenAPI/Scalar configuration, and SPA hosting.
+  </Card>
+</CardGroup>

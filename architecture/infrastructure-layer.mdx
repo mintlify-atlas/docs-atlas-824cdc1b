@@ -1,0 +1,292 @@
+---
+title: "Infrastructure layer: data access and identity"
+description: "How Infrastructure implements IApplicationDbContext with EF Core, wires ASP.NET Core Identity, and dispatches domain events via SaveChanges interceptors."
+keywords: ["infrastructure layer", "ef core", "entity framework", "identity", "application db context", "interceptors", "seeding"]
+---
+
+The Infrastructure layer provides concrete implementations for the interfaces defined in Application. It knows about EF Core, ASP.NET Core Identity, and external services—but Application knows nothing about Infrastructure. This direction of dependency means you can replace the entire data access strategy (for example, switching from SQLite to PostgreSQL, or swapping EF Core for Dapper) without touching a single line of business logic.
+
+<Note>
+Infrastructure references Application. Application never references Infrastructure. The `IApplicationDbContext` interface lives in Application; `ApplicationDbContext` lives in Infrastructure and implements it.
+</Note>
+
+## ApplicationDbContext
+
+`ApplicationDbContext` extends `IdentityDbContext<ApplicationUser>` (to get the ASP.NET Core Identity tables) and simultaneously implements `IApplicationDbContext` (so Application handlers can work against the abstraction):
+
+```csharp ApplicationDbContext.cs
+public class ApplicationDbContext
+    : IdentityDbContext<ApplicationUser>, IApplicationDbContext
+{
+    public ApplicationDbContext(DbContextOptions<ApplicationDbContext> options)
+        : base(options) { }
+
+    public DbSet<TodoList> TodoLists => Set<TodoList>();
+
+    public DbSet<TodoItem> TodoItems => Set<TodoItem>();
+
+    protected override void OnModelCreating(ModelBuilder builder)
+    {
+        base.OnModelCreating(builder);
+        builder.ApplyConfigurationsFromAssembly(Assembly.GetExecutingAssembly());
+    }
+}
+```
+
+`ApplyConfigurationsFromAssembly` scans the Infrastructure assembly for any class that implements `IEntityTypeConfiguration<T>` and applies them automatically. You never have to register configurations manually.
+
+## EF Core entity configurations
+
+Configurations live in `Data/Configurations/` and implement `IEntityTypeConfiguration<T>`. They keep mapping concerns out of the entity classes.
+
+<CodeGroup>
+
+```csharp TodoListConfiguration.cs
+public class TodoListConfiguration : IEntityTypeConfiguration<TodoList>
+{
+    public void Configure(EntityTypeBuilder<TodoList> builder)
+    {
+        builder.Property(t => t.Title)
+            .HasMaxLength(200)
+            .IsRequired();
+
+        builder.OwnsOne(b => b.Colour);
+    }
+}
+```
+
+```csharp TodoItemConfiguration.cs
+public class TodoItemConfiguration : IEntityTypeConfiguration<TodoItem>
+{
+    public void Configure(EntityTypeBuilder<TodoItem> builder)
+    {
+        builder.Property(t => t.Title)
+            .HasMaxLength(200)
+            .IsRequired();
+    }
+}
+```
+
+</CodeGroup>
+
+`OwnsOne(b => b.Colour)` maps the `Colour` value object as an EF Core owned entity. Its `Code` property is stored as a column in the `TodoLists` table rather than in a separate table.
+
+## SaveChanges interceptors
+
+Two EF Core interceptors are registered as scoped services and injected into `ApplicationDbContext` via `AddInterceptors`. They hook into `SavingChanges` / `SavingChangesAsync` to perform cross-cutting work automatically.
+
+### AuditableEntityInterceptor
+
+Populates the `Created`, `CreatedBy`, `LastModified`, and `LastModifiedBy` fields on any `BaseAuditableEntity` before the changes are written:
+
+```csharp AuditableEntityInterceptor.cs
+public void UpdateEntities(DbContext? context)
+{
+    if (context == null) return;
+
+    foreach (var entry in context.ChangeTracker.Entries<BaseAuditableEntity>())
+    {
+        if (entry.State is EntityState.Added or EntityState.Modified
+            || entry.HasChangedOwnedEntities())
+        {
+            var utcNow = _dateTime.GetUtcNow();
+            if (entry.State == EntityState.Added)
+            {
+                entry.Entity.CreatedBy = _user.Id;
+                entry.Entity.Created = utcNow;
+            }
+            entry.Entity.LastModifiedBy = _user.Id;
+            entry.Entity.LastModified = utcNow;
+        }
+    }
+}
+```
+
+The interceptor takes `IUser` (from Application) and `TimeProvider` (from the .NET BCL) as constructor dependencies, keeping it testable without mocking the entire HTTP context.
+
+### DispatchDomainEventsInterceptor
+
+Collects any domain events accumulated on entities in the change tracker, clears them from the entities, then publishes each event through MediatR before the database write completes:
+
+```csharp DispatchDomainEventsInterceptor.cs
+public async Task DispatchDomainEvents(DbContext? context)
+{
+    if (context == null) return;
+
+    var entities = context.ChangeTracker
+        .Entries<BaseEntity>()
+        .Where(e => e.Entity.DomainEvents.Any())
+        .Select(e => e.Entity);
+
+    var domainEvents = entities
+        .SelectMany(e => e.DomainEvents)
+        .ToList();
+
+    entities.ToList().ForEach(e => e.ClearDomainEvents());
+
+    foreach (var domainEvent in domainEvents)
+        await _mediator.Publish(domainEvent);
+}
+```
+
+This means when `TodoItem.Done` is set to `true`, the `TodoItemCompletedEvent` is automatically published to all registered `INotificationHandler<TodoItemCompletedEvent>` implementations—without the Application handler having to know anything about it.
+
+## Dependency injection registration
+
+`DependencyInjection.cs` in Infrastructure wires all services using `AddInfrastructureServices`:
+
+```csharp DependencyInjection.cs
+public static void AddInfrastructureServices(this IHostApplicationBuilder builder)
+{
+    var connectionString = builder.Configuration
+        .GetConnectionString(Services.Database);
+
+    builder.Services.AddScoped<ISaveChangesInterceptor, AuditableEntityInterceptor>();
+    builder.Services.AddScoped<ISaveChangesInterceptor, DispatchDomainEventsInterceptor>();
+
+    builder.Services.AddDbContext<ApplicationDbContext>((sp, options) =>
+    {
+        options.AddInterceptors(sp.GetServices<ISaveChangesInterceptor>());
+        options.UseSqlite(connectionString); // or UseNpgsql / UseSqlServer
+    });
+
+    builder.Services.AddScoped<IApplicationDbContext>(
+        provider => provider.GetRequiredService<ApplicationDbContext>());
+
+    builder.Services.AddScoped<ApplicationDbContextInitialiser>();
+
+    builder.Services.AddSingleton(TimeProvider.System);
+    builder.Services.AddTransient<IIdentityService, IdentityService>();
+}
+```
+
+`IApplicationDbContext` is registered as a scoped service that resolves `ApplicationDbContext`. This means application handlers receive the abstraction while EF Core's change tracker, transactions, and interceptors all function normally behind the scenes.
+
+## Identity
+
+### ApplicationUser
+
+`ApplicationUser` extends `IdentityUser` with no additional properties in the template. Add custom profile fields here as your application grows:
+
+```csharp ApplicationUser.cs
+public class ApplicationUser : IdentityUser
+{
+}
+```
+
+### IdentityService
+
+`IdentityService` implements `IIdentityService` (declared in Application) using ASP.NET Core's `UserManager` and `IAuthorizationService`:
+
+```csharp IdentityService.cs
+public class IdentityService : IIdentityService
+{
+    public async Task<string?> GetUserNameAsync(string userId)
+    {
+        var user = await _userManager.FindByIdAsync(userId);
+        return user?.UserName;
+    }
+
+    public async Task<bool> IsInRoleAsync(string userId, string role)
+    {
+        var user = await _userManager.FindByIdAsync(userId);
+        return user != null && await _userManager.IsInRoleAsync(user, role);
+    }
+
+    public async Task<bool> AuthorizeAsync(string userId, string policyName)
+    {
+        var user = await _userManager.FindByIdAsync(userId);
+        if (user == null) return false;
+
+        var principal = await _userClaimsPrincipalFactory.CreateAsync(user);
+        var result = await _authorizationService.AuthorizeAsync(principal, policyName);
+        return result.Succeeded;
+    }
+
+    public async Task<(Result Result, string UserId)> CreateUserAsync(
+        string userName, string password)
+    {
+        var user = new ApplicationUser { UserName = userName, Email = userName };
+        var result = await _userManager.CreateAsync(user, password);
+        return (result.ToApplicationResult(), user.Id);
+    }
+
+    public async Task<Result> DeleteUserAsync(string userId)
+    {
+        var user = await _userManager.FindByIdAsync(userId);
+        return user != null ? await DeleteUserAsync(user) : Result.Success();
+    }
+}
+```
+
+## Database seeding
+
+`ApplicationDbContextInitialiser` handles both schema creation and seed data. It is called from `Program.cs` during development startup:
+
+```csharp ApplicationDbContextInitialiser.cs
+public async Task InitialiseAsync()
+{
+    await _context.Database.EnsureDeletedAsync();
+    await _context.Database.EnsureCreatedAsync();
+}
+
+public async Task TrySeedAsync()
+{
+    // Seed the Administrator role
+    var administratorRole = new IdentityRole(Roles.Administrator);
+    if (_roleManager.Roles.All(r => r.Name != administratorRole.Name))
+        await _roleManager.CreateAsync(administratorRole);
+
+    // Seed the default admin user
+    var administrator = new ApplicationUser
+    {
+        UserName = "administrator@localhost",
+        Email    = "administrator@localhost"
+    };
+    if (_userManager.Users.All(u => u.UserName != administrator.UserName))
+    {
+        await _userManager.CreateAsync(administrator, "Administrator1!");
+        await _userManager.AddToRolesAsync(administrator, [administratorRole.Name!]);
+    }
+
+    // Seed sample todo data
+    if (!_context.TodoLists.Any())
+    {
+        _context.TodoLists.Add(new TodoList
+        {
+            Title  = "Tasks",
+            Colour = Colour.Green,
+            Items  =
+            {
+                new TodoItem { Title = "Make a todo list 📃" },
+                new TodoItem { Title = "Check off the first item ✅" },
+            }
+        });
+        await _context.SaveChangesAsync();
+    }
+}
+```
+
+<Warning>
+`EnsureDeletedAsync` drops and recreates the database on every development startup. This is intentional for a template that demonstrates the architecture, but you should replace this strategy with EF Core migrations (`Database.MigrateAsync()`) before going to production.
+</Warning>
+
+## Directory structure
+
+```
+Infrastructure/
+├── Data/
+│   ├── ApplicationDbContext.cs
+│   ├── ApplicationDbContextInitialiser.cs
+│   ├── Configurations/
+│   │   ├── TodoItemConfiguration.cs
+│   │   └── TodoListConfiguration.cs
+│   └── Interceptors/
+│       ├── AuditableEntityInterceptor.cs
+│       └── DispatchDomainEventsInterceptor.cs
+├── Identity/
+│   ├── ApplicationUser.cs
+│   ├── IdentityResultExtensions.cs
+│   └── IdentityService.cs
+└── DependencyInjection.cs
+```

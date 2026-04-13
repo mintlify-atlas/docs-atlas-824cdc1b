@@ -1,0 +1,271 @@
+---
+title: "Testing strategy: unit, functional, and acceptance"
+description: "Explore the multi-layer test approach — domain unit tests, application functional tests with Aspire, and Playwright acceptance tests."
+---
+
+The template ships five test projects that form a test pyramid. Each layer covers a different scope and trades execution speed for realism. Domain unit tests run in milliseconds with no I/O. Functional tests spin up a real database via .NET Aspire and exercise the full MediatR pipeline. Acceptance tests drive a browser against a running application using Playwright. Together they give confidence that the domain logic, application logic, and user-facing behaviour all work as expected.
+
+## Test projects at a glance
+
+<CardGroup cols={2}>
+  <Card title="Domain.UnitTests" icon="cube">
+    Pure domain logic — value objects, entities, and domain exceptions. No database, no MediatR, no ASP.NET Core. Each test is a plain NUnit test that calls domain code directly.
+  </Card>
+  <Card title="Application.UnitTests" icon="gear">
+    Handler and behaviour logic using Moq mocks. Tests verify that behaviours (logging, validation, authorization) call the right services with the right arguments.
+  </Card>
+  <Card title="Application.FunctionalTests" icon="database">
+    Full-stack application layer tests. Commands and queries are sent through the real MediatR pipeline against a real database provisioned by .NET Aspire and cleaned between tests by Respawn.
+  </Card>
+  <Card title="Infrastructure.IntegrationTests" icon="server">
+    Infrastructure-specific concerns — database migrations, EF Core configuration, and identity. Isolated from the Application layer.
+  </Card>
+</CardGroup>
+
+  <Card title="Web.AcceptanceTests" icon="browser">
+  End-to-end browser tests written in Gherkin (Reqnroll) and driven by Playwright. The application is started via .NET Aspire and tests run against the full stack including the SPA.
+</Card>
+
+## Domain unit tests
+
+Domain tests verify value objects, entity invariants, and domain exceptions with no infrastructure involved:
+
+```csharp
+// tests/Domain.UnitTests/ValueObjects/ColourTests.cs
+public class ColourTests
+{
+    [Test]
+    public void ShouldReturnCorrectColourCode()
+    {
+        var code = "#E05C4D";
+        var colour = Colour.From(code);
+        colour.Code.ShouldBe(code);
+    }
+
+    [Test]
+    public void ShouldPerformImplicitConversionToColourCodeString()
+    {
+        string code = Colour.Red;
+        code.ShouldBe("#E05C4D");
+    }
+
+    [Test]
+    public void ShouldThrowUnsupportedColourExceptionGivenNotSupportedColourCode()
+    {
+        Should.Throw<UnsupportedColourException>(() => Colour.From("##FF33CC"));
+    }
+}
+```
+
+These tests run instantly and have no external dependencies. They are the first line of defence for domain correctness.
+
+## Application unit tests
+
+Unit tests in `Application.UnitTests` use Moq to isolate the class under test. The example below verifies that `LoggingBehaviour` calls `IIdentityService.GetUserNameAsync` exactly once when the user is authenticated, and never when unauthenticated:
+
+```csharp
+// tests/Application.UnitTests/Common/Behaviours/RequestLoggerTests.cs
+public class RequestLoggerTests
+{
+    private Mock<ILogger<CreateTodoItemCommand>> _logger = null!;
+    private Mock<IUser> _user = null!;
+    private Mock<IIdentityService> _identityService = null!;
+
+    [SetUp]
+    public void Setup()
+    {
+        _logger = new Mock<ILogger<CreateTodoItemCommand>>();
+        _user = new Mock<IUser>();
+        _identityService = new Mock<IIdentityService>();
+    }
+
+    [Test]
+    public async Task ShouldCallGetUserNameAsyncOnceIfAuthenticated()
+    {
+        _user.Setup(x => x.Id).Returns(Guid.NewGuid().ToString());
+
+        var requestLogger = new LoggingBehaviour<CreateTodoItemCommand>(
+            _logger.Object, _user.Object, _identityService.Object);
+
+        await requestLogger.Process(
+            new CreateTodoItemCommand { ListId = 1, Title = "title" },
+            new CancellationToken());
+
+        _identityService.Verify(i => i.GetUserNameAsync(It.IsAny<string>()), Times.Once);
+    }
+
+    [Test]
+    public async Task ShouldNotCallGetUserNameAsyncOnceIfUnauthenticated()
+    {
+        var requestLogger = new LoggingBehaviour<CreateTodoItemCommand>(
+            _logger.Object, _user.Object, _identityService.Object);
+
+        await requestLogger.Process(
+            new CreateTodoItemCommand { ListId = 1, Title = "title" },
+            new CancellationToken());
+
+        _identityService.Verify(i => i.GetUserNameAsync(It.IsAny<string>()), Times.Never);
+    }
+}
+```
+
+## Application functional tests
+
+Functional tests send real MediatR commands and queries through the actual pipeline against a real database. This is the most important test layer for verifying application behaviour.
+
+### TestAppHost and database provisioning
+
+`tests/TestAppHost` is a .NET Aspire `DistributedApplication` that starts the database resource used by functional tests. By default it uses SQLite, so no Docker container is required. The `FunctionalTestSetup` class starts the host once for the entire test run:
+
+```csharp
+// tests/Application.FunctionalTests/FunctionalTestSetup.cs
+[SetUpFixture]
+public class FunctionalTestSetup
+{
+    internal static IServiceScopeFactory ScopeFactory { get; private set; } = null!;
+    internal static DatabaseResetter? DbResetter { get; private set; }
+
+    [OneTimeSetUp]
+    public async Task OneTimeSetUp()
+    {
+        var builder = await DistributedApplicationTestingBuilder
+            .CreateAsync<Projects.TestAppHost>(args: []);
+
+        _app = await builder.BuildAsync();
+        await _app.StartAsync();
+
+        await _app.ResourceNotifications.WaitForResourceHealthyAsync(Services.Database);
+
+        var connectionString = (await _app.GetConnectionStringAsync(Services.Database))!;
+
+        _factory = new WebApiFactory(connectionString);
+        ScopeFactory = _factory.Services.GetRequiredService<IServiceScopeFactory>();
+        DbResetter = await DatabaseResetter.CreateAsync(connectionString);
+    }
+}
+```
+
+`DatabaseResetter` wraps Respawn, which truncates all tables between tests without dropping the schema, making resets fast.
+
+### TestBase and TestApp helpers
+
+Every functional test class inherits `TestBase`, which calls `TestApp.ResetState()` before each test to reset both the database and the current user identity:
+
+```csharp
+// tests/Application.FunctionalTests/Infrastructure/TestBase.cs
+public abstract class TestBase
+{
+    [SetUp]
+    public async Task SetUp()
+    {
+        await TestApp.ResetState();
+    }
+}
+```
+
+`TestApp` provides static helpers for common test operations:
+
+```csharp
+// Send a command or query through the real MediatR pipeline
+var id = await TestApp.SendAsync(new CreateTodoListCommand { Title = "Tasks" });
+
+// Authenticate as a default user
+var userId = await TestApp.RunAsDefaultUserAsync();
+
+// Authenticate as an administrator
+var adminId = await TestApp.RunAsAdministratorAsync();
+
+// Read an entity directly from the database
+var list = await TestApp.FindAsync<TodoList>(id);
+
+// Insert an entity directly (bypass the pipeline)
+await TestApp.AddAsync(new TodoList { Title = "Seeded list" });
+```
+
+### A real functional test
+
+```csharp
+// tests/Application.FunctionalTests/TodoLists/Commands/CreateTodoListTests.cs
+public class CreateTodoListTests : TestBase
+{
+    [Test]
+    public async Task ShouldRequireMinimumFields()
+    {
+        var command = new CreateTodoListCommand();
+        await Should.ThrowAsync<ValidationException>(() => TestApp.SendAsync(command));
+    }
+
+    [Test]
+    public async Task ShouldRequireUniqueTitle()
+    {
+        await TestApp.SendAsync(new CreateTodoListCommand { Title = "Shopping" });
+
+        var command = new CreateTodoListCommand { Title = "Shopping" };
+        await Should.ThrowAsync<ValidationException>(() => TestApp.SendAsync(command));
+    }
+
+    [Test]
+    public async Task ShouldCreateTodoList()
+    {
+        var userId = await TestApp.RunAsDefaultUserAsync();
+
+        var command = new CreateTodoListCommand { Title = "Tasks" };
+        var id = await TestApp.SendAsync(command);
+
+        var list = await TestApp.FindAsync<TodoList>(id);
+
+        list.ShouldNotBeNull();
+        list!.Title.ShouldBe(command.Title);
+        list.CreatedBy.ShouldBe(userId);
+        list.Created.ShouldBe(DateTime.Now, TimeSpan.FromMilliseconds(10000));
+    }
+}
+```
+
+Authorization can also be tested functionally. The `GetTodosTests` class demonstrates how to verify that an unauthenticated user is rejected:
+
+```csharp
+[Test]
+public async Task ShouldDenyAnonymousUser()
+{
+    var query = new GetTodosQuery();
+    var action = () => TestApp.SendAsync(query);
+    await Should.ThrowAsync<UnauthorizedAccessException>(action);
+}
+```
+
+## How to run tests
+
+<Steps>
+  <Step title="Run all tests">
+    ```bash
+    dotnet test
+    ```
+    This runs `Domain.UnitTests`, `Application.UnitTests`, `Application.FunctionalTests`, and `Infrastructure.IntegrationTests`. Acceptance tests require additional setup (see below).
+  </Step>
+
+  <Step title="Run a specific test project">
+    ```bash
+    dotnet test tests/Application.FunctionalTests
+    ```
+  </Step>
+
+  <Step title="Run a specific test by name">
+    ```bash
+    dotnet test --filter "ShouldCreateTodoList"
+    ```
+  </Step>
+
+  <Step title="Run acceptance tests (Playwright)">
+    Playwright tests require the application to be running and browsers to be installed:
+
+    ```bash
+    pwsh tests/Web.AcceptanceTests/bin/Debug/net10.0/playwright.ps1 install
+    dotnet test tests/Web.AcceptanceTests
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  The default database for functional tests is **SQLite**, which is embedded and requires no Docker or external database server. If you switch to PostgreSQL or SQL Server via the template's database flag, `TestAppHost` will start the appropriate Aspire resource (which does require Docker). The test code is identical regardless of the database backend — only the `DatabaseResetter` and connection string change.
+</Note>

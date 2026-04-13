@@ -1,0 +1,253 @@
+---
+title: 'Todo Items API endpoints'
+description: 'Endpoints to create, update, patch extended details, and delete todo items within a list. All endpoints require a valid JWT bearer token.'
+keywords: ['todo items', 'api', 'endpoints', 'priority', 'clean architecture']
+---
+
+The Todo Items endpoints manage individual tasks within a todo list. You can create an item with a title, update its core fields (title and completion status), patch its extended details (list assignment, priority, and note), or delete it entirely. All four endpoints require authentication.
+
+Items are not returned by these endpoints directly — the full list of items for all todo lists is returned by `GET /api/TodoLists` in the `TodosVm` response.
+
+---
+
+## Enums
+
+### PriorityLevel
+
+The `priority` field uses integer values mapped from the `PriorityLevel` enum.
+
+| Value | Name   |
+|-------|--------|
+| `0`   | None   |
+| `1`   | Low    |
+| `2`   | Medium |
+| `3`   | High   |
+
+### Colour codes
+
+The `colour` field on a todo list (see `UpdateTodoItemDetail`) accepts one of the following hex codes:
+
+| Hex code  | Name   |
+|-----------|--------|
+| `#78909C` | Grey   |
+| `#AB47BC` | Purple |
+| `#5C6BC0` | Blue   |
+| `#26A69A` | Teal   |
+| `#4CAF50` | Green  |
+| `#D98B2B` | Orange |
+| `#E05C4D` | Red    |
+
+---
+
+## POST /api/TodoItems
+
+Creates a new todo item inside an existing todo list. The item is created with `done` set to `false` and `priority` set to `None` (0).
+
+**Authentication:** required  
+**Returns:** `201 Created` with the new item `id` in the body, and a `Location` header pointing to the new resource
+
+### Request body
+
+<ParamField body="listId" type="integer" required>
+  The ID of the todo list this item belongs to.
+</ParamField>
+
+<ParamField body="title" type="string" required>
+  Title of the todo item. Must be non-empty and at most 200 characters.
+</ParamField>
+
+<Tabs>
+  <Tab title="Request">
+    ```bash
+    curl -X POST https://localhost:5001/api/TodoItems \
+      -H "Authorization: Bearer <token>" \
+      -H "Content-Type: application/json" \
+      -d '{"listId": 1, "title": "Buy oat milk"}'
+    ```
+  </Tab>
+  <Tab title="Response">
+    **201 Created**
+
+    ```
+    Location: /TodoItems/5
+    ```
+
+    ```json
+    5
+    ```
+  </Tab>
+  <Tab title="Validation error">
+    **400 Bad Request** — returned when `title` is empty or exceeds 200 characters.
+
+    ```json
+    {
+      "type": "https://tools.ietf.org/html/rfc9110#section-15.5.1",
+      "title": "One or more validation errors occurred.",
+      "status": 400,
+      "errors": {
+        "Title": ["'Title' must not be empty."]
+      }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## PUT /api/TodoItems/{id}
+
+Updates the title and completion status of an existing todo item. The `id` in the URL path must match the `id` in the request body.
+
+**Authentication:** required  
+**Returns:** `204 No Content` on success, `400 Bad Request` on ID mismatch or validation failure
+
+<Note>
+  Setting `done` to `true` for the first time raises a `TodoItemCompletedEvent` domain event, which can be handled to trigger side effects such as notifications.
+</Note>
+
+### Path parameter
+
+<ParamField path="id" type="integer" required>
+  The ID of the todo item to update.
+</ParamField>
+
+### Request body
+
+<ParamField body="id" type="integer" required>
+  Must match the `{id}` path parameter.
+</ParamField>
+
+<ParamField body="title" type="string" required>
+  New title. Must be non-empty and at most 200 characters.
+</ParamField>
+
+<ParamField body="done" type="boolean" required>
+  Whether the item has been completed. Pass `true` to mark it done.
+</ParamField>
+
+<Tabs>
+  <Tab title="Request">
+    ```bash
+    curl -X PUT https://localhost:5001/api/TodoItems/5 \
+      -H "Authorization: Bearer <token>" \
+      -H "Content-Type: application/json" \
+      -d '{"id": 5, "title": "Buy oat milk", "done": true}'
+    ```
+  </Tab>
+  <Tab title="Response">
+    **204 No Content** — no body returned.
+  </Tab>
+  <Tab title="Error responses">
+    **400 Bad Request** — ID mismatch or validation failure.
+
+    **404 Not Found** — item with the given ID does not exist:
+
+    ```json
+    {
+      "type": "https://tools.ietf.org/html/rfc9110#section-15.5.5",
+      "title": "The specified resource was not found.",
+      "status": 404
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## PATCH /api/TodoItems/UpdateDetail/{id}
+
+Updates the extended detail fields of an existing todo item: list assignment, priority level, and note. This is a separate endpoint from the main `PUT` so that the UI can independently save detail-panel changes.
+
+The `id` in the URL path must match the `id` in the request body.
+
+**Authentication:** required  
+**Returns:** `204 No Content` on success, `400 Bad Request` on ID mismatch
+
+### Path parameter
+
+<ParamField path="id" type="integer" required>
+  The ID of the todo item to update.
+</ParamField>
+
+### Request body
+
+<ParamField body="id" type="integer" required>
+  Must match the `{id}` path parameter.
+</ParamField>
+
+<ParamField body="listId" type="integer" required>
+  The ID of the list this item belongs to. Use this to move an item to a different list.
+</ParamField>
+
+<ParamField body="priority" type="integer" required>
+  Priority level as an integer. Accepted values: `0` (None), `1` (Low), `2` (Medium), `3` (High).
+</ParamField>
+
+<ParamField body="note" type="string">
+  Optional free-text note. Pass `null` or omit to clear an existing note.
+</ParamField>
+
+<Tabs>
+  <Tab title="Request">
+    ```bash
+    curl -X PATCH "https://localhost:5001/api/TodoItems/UpdateDetail/5" \
+      -H "Authorization: Bearer <token>" \
+      -H "Content-Type: application/json" \
+      -d '{"id": 5, "listId": 1, "priority": 3, "note": "Double-check the brand."}'
+    ```
+  </Tab>
+  <Tab title="Response">
+    **204 No Content** — no body returned.
+  </Tab>
+  <Tab title="Error responses">
+    **400 Bad Request** — ID mismatch.
+
+    **404 Not Found** — item with the given ID does not exist:
+
+    ```json
+    {
+      "type": "https://tools.ietf.org/html/rfc9110#section-15.5.5",
+      "title": "The specified resource was not found.",
+      "status": 404
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## DELETE /api/TodoItems/{id}
+
+Permanently deletes a todo item.
+
+**Authentication:** required  
+**Returns:** `204 No Content` on success
+
+### Path parameter
+
+<ParamField path="id" type="integer" required>
+  The ID of the todo item to delete.
+</ParamField>
+
+<Tabs>
+  <Tab title="Request">
+    ```bash
+    curl -X DELETE https://localhost:5001/api/TodoItems/5 \
+      -H "Authorization: Bearer <token>"
+    ```
+  </Tab>
+  <Tab title="Response">
+    **204 No Content** — no body returned.
+  </Tab>
+  <Tab title="Error responses">
+    **404 Not Found** — item with the given ID does not exist:
+
+    ```json
+    {
+      "type": "https://tools.ietf.org/html/rfc9110#section-15.5.5",
+      "title": "The specified resource was not found.",
+      "status": 404
+    }
+    ```
+  </Tab>
+</Tabs>

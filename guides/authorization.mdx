@@ -1,0 +1,185 @@
+---
+title: "Authorization with the [Authorize] attribute"
+description: "Secure commands and queries using the custom [Authorize] attribute, which the MediatR pipeline enforces for role-based and policy-based access control."
+---
+
+The template ships a custom `[Authorize]` attribute that lives in the **Application layer**, separate from ASP.NET Core's `[Authorize]`. This means authorization rules travel with the request object rather than with the HTTP endpoint, making them enforceable in any context — HTTP requests, background jobs, or tests — not only when called through a controller or Minimal API endpoint.
+
+When a command or query decorated with `[Authorize]` enters the MediatR pipeline, the `AuthorizationBehaviour` inspects the attribute and checks whether the current user satisfies the required roles or policies before the handler is invoked.
+
+## The AuthorizeAttribute
+
+```csharp
+// src/Application/Common/Security/AuthorizeAttribute.cs
+
+/// <summary>
+/// Specifies the class this attribute is applied to requires authorization.
+/// </summary>
+[AttributeUsage(AttributeTargets.Class, AllowMultiple = true, Inherited = true)]
+public class AuthorizeAttribute : Attribute
+{
+    public AuthorizeAttribute() { }
+
+    /// <summary>
+    /// Gets or sets a comma delimited list of roles that are allowed to access the resource.
+    /// </summary>
+    public string Roles { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Gets or sets the policy name that determines access to the resource.
+    /// </summary>
+    public string Policy { get; set; } = string.Empty;
+}
+```
+
+The attribute is applied to the **command or query class**, not to the handler or the endpoint. It can be applied multiple times to require membership of different roles simultaneously, and the `Inherited = true` flag means derived types inherit the requirement automatically.
+
+## The AuthorizationBehaviour
+
+```csharp
+// src/Application/Common/Behaviours/AuthorizationBehaviour.cs
+public class AuthorizationBehaviour<TRequest, TResponse> : IPipelineBehavior<TRequest, TResponse>
+    where TRequest : notnull
+{
+    private readonly IUser _user;
+    private readonly IIdentityService _identityService;
+
+    public AuthorizationBehaviour(IUser user, IIdentityService identityService)
+    {
+        _user = user;
+        _identityService = identityService;
+    }
+
+    public async Task<TResponse> Handle(
+        TRequest request,
+        RequestHandlerDelegate<TResponse> next,
+        CancellationToken cancellationToken)
+    {
+        var authorizeAttributes = request.GetType().GetCustomAttributes<AuthorizeAttribute>();
+
+        if (authorizeAttributes.Any())
+        {
+            // Must be authenticated user
+            if (_user.Id == null)
+            {
+                throw new UnauthorizedAccessException();
+            }
+
+            // Role-based authorization
+            var authorizeAttributesWithRoles = authorizeAttributes
+                .Where(a => !string.IsNullOrWhiteSpace(a.Roles));
+
+            if (authorizeAttributesWithRoles.Any())
+            {
+                var authorized = false;
+
+                foreach (var roles in authorizeAttributesWithRoles.Select(a => a.Roles.Split(',')))
+                {
+                    foreach (var role in roles)
+                    {
+                        var isInRole = _user.Roles?.Any(x => role == x) ?? false;
+                        if (isInRole)
+                        {
+                            authorized = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (!authorized)
+                    throw new ForbiddenAccessException();
+            }
+
+            // Policy-based authorization
+            var authorizeAttributesWithPolicies = authorizeAttributes
+                .Where(a => !string.IsNullOrWhiteSpace(a.Policy));
+
+            if (authorizeAttributesWithPolicies.Any())
+            {
+                foreach (var policy in authorizeAttributesWithPolicies.Select(a => a.Policy))
+                {
+                    var authorized = await _identityService.AuthorizeAsync(_user.Id, policy);
+
+                    if (!authorized)
+                        throw new ForbiddenAccessException();
+                }
+            }
+        }
+
+        // User is authorized / authorization not required
+        return await next();
+    }
+}
+```
+
+The behaviour checks three things in order:
+
+1. **Authentication** — if the request requires any authorization and `IUser.Id` is `null`, it throws `UnauthorizedAccessException` (mapped to HTTP 401).
+2. **Role authorization** — if `Roles` is set, the user must belong to at least one of the listed roles (comma-separated). Failure throws `ForbiddenAccessException` (HTTP 403).
+3. **Policy authorization** — if `Policy` is set, `IIdentityService.AuthorizeAsync` is called for each policy. Failure also throws `ForbiddenAccessException`.
+
+## Applying [Authorize] to a command or query
+
+### Require authentication only
+
+```csharp
+[Authorize]
+public record GetTodosQuery : IRequest<TodosVm>;
+```
+
+Any unauthenticated call to `GetTodosQuery` will throw `UnauthorizedAccessException` before the handler runs.
+
+### Require a role
+
+```csharp
+[Authorize(Roles = "Administrator")]
+public record PurgeAuditLogsCommand : IRequest;
+```
+
+The user must be a member of the `Administrator` role. Multiple roles can be listed as a comma-separated string:
+
+```csharp
+[Authorize(Roles = "Administrator,Manager")]
+public record ApproveExpenseCommand : IRequest;
+```
+
+The user must belong to at least one of the listed roles.
+
+### Require a policy
+
+```csharp
+[Authorize(Policy = "CanPurge")]
+public record PurgeAuditLogsCommand : IRequest;
+```
+
+`IIdentityService.AuthorizeAsync(userId, "CanPurge")` is called. The implementation of that interface in `src/Infrastructure/Identity/IdentityService.cs` delegates to ASP.NET Core's `IAuthorizationService`.
+
+### Stacking multiple attributes
+
+```csharp
+[Authorize(Roles = "Administrator")]
+[Authorize(Policy = "CanPurge")]
+public record PurgeAuditLogsCommand : IRequest;
+```
+
+Both checks must pass. If role authorization fails, the policy check is never reached.
+
+<Note>
+  The `AuthorizationBehaviour` reads the current user's identity from `IUser` and checks policies via `IIdentityService`. `IUser` is implemented in `src/Web/Services/CurrentUser.cs` and reads from `IHttpContextAccessor`. In tests, `WebApiFactory` replaces this with a `Mock<IUser>` whose `Id` and `Roles` are set by `TestApp.RunAsDefaultUserAsync()` or `TestApp.RunAsAdministratorAsync()`.
+</Note>
+
+<Warning>
+  The application-layer `[Authorize]` attribute secures the **MediatR request**, not the HTTP endpoint. Any endpoint that sends an authorized request should also call `groupBuilder.RequireAuthorization()` in its `Map` method so that unauthenticated HTTP requests are rejected at the routing layer before they even reach MediatR:
+
+  ```csharp
+  public static void Map(RouteGroupBuilder groupBuilder)
+  {
+      groupBuilder.RequireAuthorization();
+
+      groupBuilder.MapGet(GetTodoLists);
+      groupBuilder.MapPost(CreateTodoList);
+  }
+  ```
+
+  Without `RequireAuthorization()` at the HTTP level, an unauthenticated request will reach the `AuthorizationBehaviour` and throw an unhandled `UnauthorizedAccessException` rather than returning a clean 401 from the ASP.NET Core authentication middleware.
+</Warning>
